@@ -1,0 +1,20 @@
+[package]
+name = "nexus-tui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+nexus-core = { path = "../nexus-core" }
+nexus-syntax = { path = "../nexus-syntax" }
+nexus-theme = { path = "../nexus-theme" }
+ratatui = { version = "0.30.2", default-features = false, features = ["crossterm"] }
+crossterm = "0.29.0"
+unicode-width = "0.2"
+trash = "5"
+serde = { version = "1.0", features = ["derive"] }
+toml = "0.8"
+
+[dev-dependencies]
+# Habilita apenas em testes o gatilho controlado de recuperação pendente.
+nexus-core = { path = "../nexus-core", features = ["test-support"] }

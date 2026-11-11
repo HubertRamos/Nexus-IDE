@@ -1,0 +1,13 @@
+[package]
+name = "nexus-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+# Expõe um gatilho de falha controlada usado apenas pelos testes da TUI.
+# Não altera builds normais; é ativado somente como dependência de teste.
+test-support = []
+
+[dependencies]
+ropey = "1.6.1"
