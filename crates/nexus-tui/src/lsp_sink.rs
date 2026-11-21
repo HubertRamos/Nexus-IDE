@@ -84,6 +84,33 @@ impl LspSyncSink {
         }
     }
 
+    /// Solicita completion para um documento já roteado ao serviço LSP.
+    pub fn request_completion(
+        &mut self,
+        path: &Path,
+        position: Position,
+        trigger_kind: u8,
+        trigger_character: Option<String>,
+    ) -> Option<CompletionOperationId> {
+        let route = self.routes.get(path)?;
+        let uri = nexus_lsp::uri::path_to_uri(path);
+        Some(self.service.request_completion(
+            route.workspace.clone(),
+            route.language_id.clone(),
+            uri,
+            position,
+            trigger_kind,
+            trigger_character,
+        ))
+    }
+
+    /// Drena resultados de completion recebidos do servidor.
+    pub fn drain_completion_results(&mut self) -> Vec<CompletionResult> {
+        let notices = self.poll_service_events();
+        self.pending_notices.extend(notices);
+        std::mem::take(&mut self.completion_results).into_iter().collect()
+    }
+
     /// Define a raiz do workspace ativo.
     ///
     /// O caminho é canonicalizado para coincidir com a normalização aplicada
@@ -239,33 +266,6 @@ impl SyncSink for LspSyncSink {
 
     fn cancel_navigation(&mut self, operation_id: nexus_lsp::service::NavigationOperationId) {
         self.service.cancel_navigation(operation_id);
-    }
-
-    /// Solicita completion para um documento já roteado ao serviço LSP.
-    pub fn request_completion(
-        &mut self,
-        path: &Path,
-        position: Position,
-        trigger_kind: u8,
-        trigger_character: Option<String>,
-    ) -> Option<CompletionOperationId> {
-        let route = self.routes.get(path)?;
-        let uri = nexus_lsp::uri::path_to_uri(path);
-        Some(self.service.request_completion(
-            route.workspace.clone(),
-            route.language_id.clone(),
-            uri,
-            position,
-            trigger_kind,
-            trigger_character,
-        ))
-    }
-
-    /// Drena resultados de completion recebidos do servidor.
-    pub fn drain_completion_results(&mut self) -> Vec<CompletionResult> {
-        let notices = self.poll_service_events();
-        self.pending_notices.extend(notices);
-        std::mem::take(&mut self.completion_results).into_iter().collect()
     }
 
     fn current_session_id(&mut self, workspace: &str, language_id: &str) -> Option<i64> {
