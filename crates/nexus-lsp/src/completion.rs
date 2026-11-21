@@ -129,7 +129,6 @@ pub async fn request_completion(
         .await
 }
 
-/// Itens em ordem recebida, sem alterar a ordenação do servidor.
 impl CompletionResponse {
     /// Itens em ordem recebida, sem alterar a ordenação do servidor.
     pub fn items(&self) -> &[CompletionItem] {
