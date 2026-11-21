@@ -7,7 +7,7 @@ use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::Paragraph;
+use ratatui::widgets::{Block, Clear, Paragraph};
 
 use crate::app::App;
 use crate::diagnostics::{self, ResolvedDiagnostic};
@@ -151,6 +151,67 @@ pub(super) fn render(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_widget(
         Paragraph::new(lines).style(Style::new().fg(theme.foreground()).bg(theme.background())),
         text_area,
+    );
+
+    render_completion_popup(frame, area, app);
+}
+
+fn render_completion_popup(frame: &mut Frame, area: Rect, app: &App) {
+    let Some(completion) = app.completion_popup() else { return; };
+    if area.width < 8 || area.height < 4 || completion.items().is_empty() { return; }
+
+    let buffer = app.buffer();
+    let cursor = app.view().cursor();
+    let Ok(line) = buffer.line_of_char(cursor) else { return; };
+    let top_line = app.view().top_line();
+    if line < top_line || line >= top_line + area.height as usize { return; }
+    let Ok(column) = app.view().visual_column_of(buffer, line, cursor) else { return; };
+
+    let gutter = gutter_width(buffer.line_count().unwrap_or(1)).min(area.width);
+    let text_origin = area.x.saturating_add(gutter).saturating_add(u16::from(area.width > gutter));
+    let cursor_x = text_origin.saturating_add(column.saturating_sub(app.view().left_col()) as u16);
+    let cursor_y = area.y.saturating_add((line - top_line) as u16);
+
+    let max_label = completion.items().iter()
+        .take(8)
+        .map(|item| item.label.chars().count() + item.detail.as_deref().map(|v| v.chars().count() + 2).unwrap_or(0))
+        .max().unwrap_or(16);
+    let width = (max_label.saturating_add(4) as u16).clamp(20, 48).min(area.width);
+    let rows = completion.items().len().min(8) as u16;
+    let height = (rows + 2).min(area.height);
+    if width < 8 || height < 3 { return; }
+
+    let x = cursor_x.min(area.x.saturating_add(area.width.saturating_sub(width)));
+    let below = cursor_y.saturating_add(1);
+    let y = if below.saturating_add(height) <= area.y.saturating_add(area.height) {
+        below
+    } else {
+        cursor_y.saturating_sub(height.saturating_sub(1)).max(area.y)
+    };
+    let popup = Rect::new(x, y, width, height);
+    frame.render_widget(Clear, popup);
+
+    let visible_rows = height.saturating_sub(2) as usize;
+    let offset = completion.selected().saturating_sub(visible_rows.saturating_sub(1));
+    let lines: Vec<Line> = completion.items().iter().enumerate()
+        .skip(offset).take(visible_rows)
+        .map(|(index, item)| {
+            let selected = index == completion.selected();
+            let style = if selected {
+                Style::new().fg(theme.selection_text()).bg(theme.selection()).add_modifier(Modifier::BOLD)
+            } else {
+                Style::new().fg(if item.deprecated == Some(true) { theme.muted() } else { theme.foreground() }).bg(theme.dialog())
+            };
+            let detail = item.detail.as_deref().map(|value| format!("  {value}")).unwrap_or_default();
+            Line::from(Span::styled(format!(" {}{}", item.label, detail), style))
+        }).collect();
+
+    let block = Block::bordered()
+        .title(" Sugestões ")
+        .border_style(Style::new().fg(theme.accent()).bg(theme.dialog()));
+    frame.render_widget(
+        Paragraph::new(lines).block(block).style(Style::new().bg(theme.dialog())),
+        popup,
     );
 }
 
