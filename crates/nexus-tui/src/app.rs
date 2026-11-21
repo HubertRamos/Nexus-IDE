@@ -1099,25 +1099,19 @@ impl App {
             return;
         };
         let cursor = self.view.cursor().0.min(text.chars().count());
-        let line_start = text[..text.char_indices().take(cursor).last().map(|(i, c)| i + c.len_utf8()).unwrap_or(0)]
-            .rfind('\n')
-            .map(|index| index + 1)
-            .unwrap_or(0);
-        let prefix: String = text[line_start..]
+        // Considera somente o identificador imediatamente antes do cursor.
+        let before_cursor: String = text.chars().take(cursor).collect();
+        let prefix: String = before_cursor
+            .rsplit('\n')
+            .next()
+            .unwrap_or("")
             .chars()
+            .rev()
             .take_while(|character| character.is_alphanumeric() || *character == '_')
+            .collect::<String>()
+            .chars()
+            .rev()
             .collect();
-        let prefix = if prefix.is_empty() {
-            String::new()
-        } else {
-            // O cursor pode estar no meio da linha: considera somente o texto
-            // imediatamente anterior ao cursor, não o restante da linha.
-            let before_cursor: String = text.chars().take(cursor).collect();
-            before_cursor.rsplit('\n').next().unwrap_or("").chars()
-                .rev()
-                .take_while(|character| character.is_alphanumeric() || *character == '_')
-                .collect::<String>().chars().rev().collect()
-        };
         let selected_label = popup.items.get(popup.selected).map(|item| item.label.clone());
         popup.items = filter_completion_items(&popup.source_items, &prefix);
         popup.selected = selected_label
@@ -3303,7 +3297,7 @@ impl App {
     }
 
     fn delete_forward(&mut self) {
-        let had_completion = self.completion_popup.is_some();
+        self.clear_completion();
         if !self.buffer.is_consistent() {
             self.report_recovery();
             return;
@@ -6087,6 +6081,61 @@ fn evaluate_external_change(
                 ),
             ))
         }
+    }
+}
+
+#[cfg(test)]
+mod completion_filter_tests {
+    use super::*;
+
+    fn item(label: &str, filter_text: Option<&str>) -> CompletionItem {
+        CompletionItem {
+            label: label.to_owned(),
+            kind: None,
+            detail: None,
+            documentation: None,
+            deprecated: None,
+            preselect: None,
+            sort_text: None,
+            filter_text: filter_text.map(str::to_owned),
+            insert_text: None,
+            insert_text_format: None,
+            extra: BTreeMap::new(),
+        }
+    }
+
+    #[test]
+    fn filters_by_case_insensitive_prefix_and_preserves_server_order() {
+        let items = vec![
+            item("map", None),
+            item("max", None),
+            item("append", None),
+        ];
+        let filtered = filter_completion_items(&items, "ma");
+        assert_eq!(
+            filtered.iter().map(|item| item.label.as_str()).collect::<Vec<_>>(),
+            vec!["map", "max"]
+        );
+    }
+
+    #[test]
+    fn uses_filter_text_when_server_provides_it() {
+        let items = vec![item("display label", Some("internal_name"))];
+        assert_eq!(filter_completion_items(&items, "int").len(), 1);
+        assert!(filter_completion_items(&items, "dis").is_empty());
+    }
+
+    #[test]
+    fn empty_prefix_restores_all_original_suggestions_after_backspace() {
+        let items = vec![item("alpha", None), item("beta", None)];
+        assert_eq!(filter_completion_items(&items, "alp").len(), 1);
+        assert_eq!(filter_completion_items(&items, "").len(), 2);
+    }
+
+    #[test]
+    fn unmatched_prefix_returns_an_empty_list() {
+        let items = vec![item("alpha", None), item("beta", None)];
+        assert!(filter_completion_items(&items, "xyz").is_empty());
     }
 }
 
