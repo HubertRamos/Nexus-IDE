@@ -801,6 +801,15 @@ mod tests {
         }
         assert!(text_document.get("references").is_none());
         assert_eq!(text_document["synchronization"]["didSave"], true);
+        assert_eq!(text_document["completion"]["contextSupport"], true);
+        assert_eq!(
+            text_document["completion"]["completionItem"]["snippetSupport"],
+            true
+        );
+        assert_eq!(
+            text_document["completion"]["completionItem"]["documentationFormat"],
+            json!(["markdown", "plaintext"])
+        );
 
         let decoded: InitializeParams = serde_json::from_value(value.clone()).unwrap();
         assert_eq!(decoded.capabilities, params.capabilities);
