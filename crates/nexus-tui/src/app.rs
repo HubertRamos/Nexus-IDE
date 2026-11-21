@@ -1021,8 +1021,11 @@ impl App {
     fn handle_completion_key(&mut self, key: ratatui::crossterm::event::KeyEvent) -> bool {
         if self.completion_popup.is_none()
             || key.kind == ratatui::crossterm::event::KeyEventKind::Release
-            || !key.modifiers.is_empty()
         {
+            return false;
+        }
+        if !key.modifiers.is_empty() {
+            self.clear_completion();
             return false;
         }
         use ratatui::crossterm::event::KeyCode;
