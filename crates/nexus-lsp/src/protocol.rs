@@ -216,6 +216,21 @@ impl ClientCapabilities {
                 declaration: link_support(),
                 type_definition: link_support(),
                 implementation: link_support(),
+                extra: BTreeMap::from([(
+                    "completion".to_owned(),
+                    serde_json::json!({
+                        "dynamicRegistration": false,
+                        "completionItem": {
+                            "snippetSupport": true,
+                            "documentationFormat": ["markdown", "plaintext"],
+                            "deprecatedSupport": true,
+                            "preselectSupport": true,
+                            "insertReplaceSupport": false,
+                            "labelDetailsSupport": true
+                        },
+                        "contextSupport": true
+                    }),
+                )]),
                 ..Default::default()
             }),
             ..Default::default()
