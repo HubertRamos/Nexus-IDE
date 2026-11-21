@@ -14,8 +14,18 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use nexus_lsp::completion::CompletionResponse;
 use nexus_lsp::protocol::{NavigationMethod, Position, PublishDiagnosticsParams};
-use nexus_lsp::service::{NavigationCompletion, NavigationOperationId};
+use nexus_lsp::service::{CompletionOperationId, NavigationCompletion, NavigationOperationId};
+
+/// Resultado assíncrono de uma solicitação de completion.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CompletionResult {
+    pub operation_id: CompletionOperationId,
+    pub uri: String,
+    pub document_version: Option<i64>,
+    pub result: Result<Option<CompletionResponse>, String>,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct DiagnosticsKey {
@@ -117,6 +127,22 @@ pub trait SyncSink {
     }
 
     fn cancel_navigation(&mut self, _operation_id: NavigationOperationId) {}
+
+    /// Solicita sugestões para um documento aberto no sink.
+    fn request_completion(
+        &mut self,
+        _path: &Path,
+        _position: Position,
+        _trigger_kind: u8,
+        _trigger_character: Option<String>,
+    ) -> Option<CompletionOperationId> {
+        None
+    }
+
+    /// Coleta respostas assíncronas de completion.
+    fn drain_completion_results(&mut self) -> Vec<CompletionResult> {
+        Vec::new()
+    }
 
     fn current_session_id(&mut self, _workspace: &str, _language_id: &str) -> Option<i64> {
         None
@@ -274,6 +300,29 @@ impl DocumentSyncBridge {
         if let Some(sink) = self.sink.as_mut() {
             sink.cancel_navigation(operation_id);
         }
+    }
+
+    /// Solicita completion para um documento rastreado pela ponte.
+    pub fn request_completion(
+        &mut self,
+        path: &Path,
+        position: Position,
+        trigger_kind: u8,
+        trigger_character: Option<String>,
+    ) -> Option<CompletionOperationId> {
+        self.sink.as_mut()?.request_completion(
+            &normalize(path),
+            position,
+            trigger_kind,
+            trigger_character,
+        )
+    }
+
+    pub fn drain_completion_results(&mut self) -> Vec<CompletionResult> {
+        self.sink
+            .as_mut()
+            .map(|sink| sink.drain_completion_results())
+            .unwrap_or_default()
     }
 
     /// Workspace efetivo usado para rotear este caminho ao servidor LSP.
