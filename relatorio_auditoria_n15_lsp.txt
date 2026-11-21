@@ -1,0 +1,679 @@
+================================================================================
+NEXUS 1.5 - AUDITORIA ARQUITETURAL E PLANO DE IMPLEMENTACAO DO LSP
+Etapa 1: Diagnostico de arquitetura e planejamento tecnico
+Data: 2026-11-11
+Estado: Analise somente de leitura; NENHUM ARQUIVO DO PROJETO FOI MODIFICADO
+================================================================================
+
+NOTA DE METODOLOGIA
+- Todos os dados abaixo foram extraidos do codigo-fonte atual (33 arquivos .rs,
+  4 crates, configs, docs). Nenhum teste foi executado sobre alteracoes.
+- A suita existente (nexus-core + nexus-syntax + nexus-theme + nexus-tui)
+  foi verificada em build e teste: 360 testes passaram (73 + 23 + 21 + 243).
+- [FATO] = observacao verificada no codigo.
+- [RECOMENDACAO] = sugestao de projeto, a ser aplicada somente na etapa
+  seguinte, apos aprovacao.
+
+================================================================================
+1. ARQUITETURA ATUAL E PONTOS DE INTEGRACAO
+================================================================================
+
+1.1 Estrutura do workspace (4 crates)
+--------------------------------------
+crates/nexus-core      : buffer (ropey), edicao, historico, posicoes
+crates/nexus-syntax    : tree-sitter, highlighting, LanguageId, SyntaxState
+crates/nexus-theme     : temas (dirs, serde, toml), sem dependencia de TUI
+crates/nexus-tui       : Ratatui, DocumentManager, Workspace, App, event loop
+
+Relacoes atuais:
+- nexus-core nao depende de nada mais (apenas ropey).
+- nexus-syntax depende de nexus-core (posicoes CharOffset/TextRange) e de
+  tree-sitter, mas NÃO de nexus-tui nem ratatui.
+- nexus-theme não depende de TUI/Ratatui/Core.
+- nexus-tui depende de core, syntax, theme, ratatui, crossterm, serde, toml,
+  trash, dirs, unicode-width.
+- Existe apenas 1 commit "first commit" no git; a arvore esta limpa.
+
+1.2 Diagrama de integrade (fatos de codigo)
+-------------------------------------------
+nexus-core
+|-- buffer/mod.rs        : Buffer (ropey), historico, transacoes, integridade
+|-- buffer/position.rs   : CharOffset (usize = caractere Unicode)
+|-- buffer/edit.rs       : TextRange, Edit, AppliedEdit, BufferError
+|-- buffer/history.rs    : Transaction (undo/redo), History
+
+nexus-syntax
+|-- language.rs          : LanguageId (Rust, Python, JS, TS, TSX)
+|-- state.rs             : SyntaxState (parser, arvore, text, LineIndex,
+|                          highlights, apply_edit, resync)
+|-- token.rs             : TokenKind, HighlightSpan (offsets de caracteres)
+|-- queries.rs           : consultas embutidas de highlighting
+
+nexus-tui
+|-- app.rs               : App (documents: DocumentManager, workspace,
+|                          syntax, buffer, view, prompt, confirm...)
+|-- document.rs          : Document (buffer, view, path, syntax, disk,
+|                          flags), DocumentManager
+|-- workspace.rs         : Workspace (diretório raiz)
+|-- view.rs              : View (cursor, anchor, top_line, left_col)
+|-- main.rs              : run(), event_loop()
+|-- event.rs             : Event (Key/Mouse/Resize), POLL_INTERVAL = 250ms
+|-- ui/editor.rs         : render_line, spans de highlight
+|-- ui/status_bar.rs     : barra de status
+|-- theme.rs             : ThemeState, ColorMode
+|-- watcher.rs           : FileFingerprint (len+hash FNV-1a),
+|                          FileWatcher, detect_change
+|-- files.rs             : read_document, write_document (atomico)
+|-- session.rs           : Session, SessionDocument
+|-- recovery.rs          : RecoveryManager, RecoveryRecord
+|-- explorer.rs          : explorador de arquivos
+|-- recent.rs            : projetos recentes
+|-- cli.rs               : interpretacao de argumentos
+|-- input.rs             : traducao de teclas => Actions
+|-- terminal.rs          : TerminalSession, panic hook, restauracao
+
+1.3 DocumentManager: como os documentos sao mantidos
+----------------------------------------------------
+[FATO] DocumentManager {
+        inactive: Vec<Document>,   // abas inativas, na ordem conceitual
+        active_index: usize,      // indice do documento ativo
+      }   [document.rs:260-264]
+
+[FATO] O documento ATIVO NAO esta no vetor: ele e dono do App:
+      self.buffer, self.view, self.path, self.document_name,
+      self.syntax, self.disk, self.recovered, self.missing,
+      self.conflict, self.recovery_id   [app.rs:340-386]
+
+- tabs() junta inativos com ativo na posicao active_index.
+- switch_to() transfere o documento ativo para o vetor e ajusta o ponteiro.
+- with_active_document() e o padrao para operacoes que precisam do
+  documento ativo materializado (take + reinstall).
+- index_of_path() compara caminhos canonicados via canonical_or_owned().
+- Document { path: Option<PathBuf>, name, syntax, buffer, view, disk,
+  recovered, missing, conflict, recovery_id }   [document.rs:59-77]
+- Identificacao: caminho canonico + recovery_id (id estabilizado para o
+  Recovery Manager) + disk fingerprint (len+hash).
+
+1.4 Ponto critico: nao ha registro de clientes LSP em nenhum lugar
+------------------------------------------------------------------
+[FATO] O codigo atual nao tem: LspClient, LspServer, LanguageServer,
+      Bus de eventos de documento, registry de servidores.
+- Nenhum dos arquivos acima menciona "lsp", "language_server", "jsonrpc"
+  ou "stdio" (verificacao por grep -i em todo o codigo).
+- O DocumentManager gerencia apenas a estrutura de abas; o servidor de
+  linguagem nao e um conceito da camada de abas.
+
+1.5 Buffer e posicoes (nexus-core)
+-----------------------------------
+[FATO] CharOffset = struct CharOffset(pub usize)  [position.rs:1-2]
+[FATO] TextRange { start: CharOffset, end: CharOffset }  [edit.rs:3-7]
+[FATO] Buffer.content: Rope (ropey::Rope); todas as operacoes em offsets de
+      CARACTERES Unicode, NÃO bytes.
+[FATO] Metodos publicos de Buffer: insert, delete, replace, apply_edit,
+      apply_transaction, begin_transaction, commit_transaction,
+      undo, redo, is_modified, revision, saved_revision,
+      text, len_chars, line_start, line_end, line_of_char, slice, ...
+[FATO] Transaction: undo_edits() e redo_edits() retornam
+      (TextRange, &str) e revision_before()/revision_after().
+[FATO] is_modified() compara revision vs saved_revision.
+      VERIFICACAO IMPORTANTE: undo() seta revision = revision_before da
+      transacao desfeita; logo o "revision" NÃO e um contador monotonico.
+[FATO] RecoveryState: Buffer pode entrar em "RecoveryPending" e bloquear
+      todas as operacoes normalmente (BufferError::RecoveryRequired).
+
+1.6 Conversao posicao/texto: caracter vs byte vs UTF-16
+-------------------------------------------------------
+[FATO] Cargo: Rope e String sao UTF-8. A nexus Workcomo "char offsets"
+      (escalares Unicode), sempre.
+[FATO] tree-sitter usa offsets de byte (Point { row, col }) e InputEdit com
+      start_byte, old_end_byte, new_end_byte (bytes), nao caracteres.
+[FATO] Nexus ja possui o conversor que precisa entre os dois para sintaxe:
+      LineIndex::char_to_byte, byte_to_char, point(byte) -> tree_sitter
+      Point   [state.rs:460-548]
+[FATO] O LSP exige posicoes no formato UTF-16: Position { line: u32,
+      character: u32 } onde "character" e o offset em UNIDADES UTF-16.
+[FATO] Em Rust, char.len_utf16() pode ser 1 (quase todos os caracteres
+      comuns) ou 2 (caracteres do plano multigoal: emoji, caracteres
+      historicos, etc.).
+[CONCLUSAO] A conversao UTF-16 precisa ser implementada externamente ao
+      core (em nexus-lsp), pois o core nao possui funcoes UTF-16.
+
+1.7 Event loop e threads
+------------------------
+[FATO] event_read() pola crossterm a cada POLL_INTERVAL (250ms) e transforma
+      em Event::Key/Mouse/Resize  [event.rs:12, 26-37]
+[FATO] O loop principal (main.rs:96-115): desenhar se needs_redraw, senao
+      chamar event::read; se expirar => on_idle().
+[FATO] Single-thread, sem canais/threads atuais.
+[FATO] nenhum conceito de "servico" ou "processo" em execucao.
+[CONCLUSAO] Qualquer I/O com servidores externos (LSP) precisa rodar em
+      threads/async fora do loop da TUI para nao bloquear a interface.
+
+1.8 Nexus-syntax: highlight vs semantica de linguagem
+-----------------------------------------------------
+[FATO] LanguageId fixo: Rust, Python, JavaScript, TypeScript, Tsx.
+      Deteccao por extensao/filename  [language.rs:8-29]
+[FATO] SyntaxState mantém parser, arvore de arvore, text (copia), LineIndex,
+      highlights. Aplica edicoes incrementalmente via tree_sitter::InputEdit
+      [state.rs:23-31, 97-149]. Resync calcula a menor edicao entre textos
+      para usar em undo/redo  [state.rs:156-197].
+[FATO] HighlightSpan usa TextRange em CharOffset (offsets de caracteres).
+[FATO] nexus-core nao expoe "linguagem" nem simbolos: highlighting é o
+      unico suporte de linguagem atual.
+[CONCLUSAO] "Sugerir suporte a linguagem" NÃO é equivalente a "destacar
+      sintaxe". A LSP vai ser a camada semantica; o nexus-syntax continua
+      no papel de highlight/identificacao de idioma e pode reutilizar
+      LanguageId para decisao de serviço.
+
+1.9 Workspace, caminhos e config
+--------------------------------
+[FATO] Workspace: raiz absoluta/canonicalizada; open(), root(), contains_
+      existing(), resolve()  [workspace.rs:56-126]
+[FATO] CLI infere a raiz de projetos por marcadores (.git, Cargo.toml,
+      package.json, pyproject.toml, go.mod, Makefile) e rejeita multi-
+      workspace  [cli.rs:13-21, 194-228]
+[FATO] Configuração global: config.toml (ambiente/ThemeConfig) com campos
+      ui = "...", syntax = "..."  [theme.rs:82-90, 120-122; docs/THEMES.md]
+[FATO] AppPaths deriva session_file, recent_file, recovery_dir do
+      ThemePaths  [paths.rs:11-42]
+[FATO] Nexus tem "recovery" (copias de seguranca de trabalho nao salvo),
+      "session" (abertura/restauracao), e "recent" (10 projetos) - todas
+      com persistencia atomic via files::write_document.
+[CONCLUSAO] A configuracao de servidores de linguagem (binario, args,
+      idiomas, capacidades, restart) precisa de um bloco de configura cao
+      proprio, separado de UI/themes/session.
+
+================================================================================
+2. VIABILIDADE E JUSTIFICATIVA DE CRATE nexus-lsp
+================================================================================
+
+2.1 Recomendacao: SIM, criar crates/nexus-lsp
+----------------------------------------------
+[RECOMMENDACAO] Criar crates/nexus-lsp como crate do workspace, independente
+      de TUI, para reutilizacao futura em GUI.
+
+[RECOMMENDACAO] Motivos:
+- Isolamento: a inteligencia LSP nao depende de Ratatui/crossterm.
+- Reutilizacao: futura GUI usará o mesmo Client e Server.
+- Teste: servidores simulados podem ser testados sem rodear a TUI.
+- Limpeza: DocumentManager fica intacto; o cliente fica na camada App.
+- Fronteira natural: nexus-syntax ja prova que um crate pode ser
+  TUI-independent (possui linguagem e SyntaxState sem depender de TUI).
+
+[RECOMMENDACAO] Como nao foi perguntado para adicionar dependencias ou
+      criar crates nesta etapa, essa criacao pertence a Etapa 0,
+      aprovada preliminarmente.
+
+2.2 Alternativa nao-recomendada: encaixar LSP no nexus-tui
+-----------------------------------------------------------
+- Acontece de todo o LSP dentro do loop de eventos terminal.
+- Impede testar servidores simulados sem renderizar a interface.
+- Acopla a linguagem de comunicacao ao ciclo de vida do terminal.
+- Exige que funcionalidades visuais (diagnosticos, hover) estejam
+  sempre disponiveis, o que impede a camada de servidores ser
+  testada isoladamente.
+
+2.3 Fronteira recomendada (placar)
+----------------------------------
+nexus-core           : Buffer (a entidade editável; nao muda).
+nexus-syntax         : LanguageId (decisao de linguagem do documento).
+nexus-lsp            : Client, Transport, Server, Capabilities,
+                       Diagnostics, Position, Workspace, Protocol,
+                       TestUtil.
+nexus-tui            : App regra de clientes por documento, bridge,
+                       UI (diagnosticos, hover, completacao, etc.).
+
+================================================================================
+3. BIBLIOTECAS RUST RECOMENDADAS (sem adicionar deps nesta etapa)
+================================================================================
+
+3.1 Comparacao de alternativas para JSON-RPC 2.0
+------------------------------------------------
+[Compara] jsonrpc-derive + serde: geracao de codigo para serializacao de
+      req/resp. Pros: produtividade, tipos seguros. Contras: sincrono no
+      nucleo, tempo de compilacao maior, depende de derive macros.
+      [RECOMENDACAO] possivel em etapas posteriores, se fuer preferido.
+
+[Compara] jsonrpc-core (+ client): biblioteca sincrona madura, baixo
+      nivel. Pros: estabilidade, controle total. Contras: nao tem
+      transporte stdin/e processo; voce mesmo precisa implementar
+      canal, timeouts e mapeamento de ids.
+
+[Compara] jsonrpc-rs (jsonrpc-core-server, jsonrpc-core-client,
+      jsonrpc-process): ja inclui transporte de STDIO e gerenciamento
+      de processos. Pros: focado em JSON-RPC over STDIO. Contras:
+      ecossistema menor, documentacao mais antiga, dependencias mais
+      pesadas.
+
+[Compara] lsp-types: definicoes tipadas do protocolo LSP. Pros: mao
+      de payloads validos; constante do.ecossistema. Contras: so
+      tipos; nao resolve comunicacao.
+
+[Compara] Tokio (rt, io-util, sync): runtime assincrono maduro,
+      suporta Linux e Windows. Pros: IO assincrona nativa; facil
+      de testar com fake servers. Contras: precisa implementar
+      a camada de mensageria JSON-RPC (instancia de codigo).
+
+[Compara] serde_json + async-channel + manual: implementacao
+      minimalista de JSON-RPC 2.0 sobre STDIO (linhas de texto).
+      Pros: controle total, dependencias minimas, facil debug e
+      teste. Contras: voce implementa map de ids, timeouts,
+      batching.
+
+[RECOMENDACAO PRATICA PARA ETAPA 1]
+- Usar serde_json + tokio (rt, io-util, sync, net) + implementacao
+  manual de JSON-RPC 2.0 sobre STDIO (linha a linha).
+- Motivos: menor ligacao, sem dependencias externas de protocolo
+  (jsonrpc-rs, jsonrpc-derive), teste simples com servidor fake,
+  robustez de erros explicitos.
+- Depois valer a pena analisar se vale a pena trocar por
+  jsonrpc-derive ou lsp-types (tipos) para etapas futuras.
+
+3.2 Dependencias propostas para Etapa 1 (apesar de instrucao de nao
+    adicionar, apresentacao para decisao futura)
+[PROPOSED] tokio (rt, io-util, sync, net)
+[PROPOSED] serde_json
+[PROPOSED] url (somente se o suporte a file:// for implementado antes
+           da etapa 1; opcional)
+[PROPOSED] lsp-types (somente se voce quiser tipos tipados; opcional)
+
+3.3 Processos e comunicacao
+---------------------------
+[RECOMENDACAO] Use std::process::Command para spawn.
+- stdout -> pipe (JSON-RPC).
+- stderr -> pipe/redirecionado para log do processo (nunca para o
+  stdout do Nexus).
+- stdin -> pipe (escrita do cliente).
+
+[RECOMENDACAO] Utilizar Tokio para:
+- leitura assincrona de stdin/stdout.
+- escrita assincrona de req/s.
+- monitoramento de saida do processo.
+- timeouts globais nas req/resp.
+
+3.4 Configuracao
+----------------
+[RECOMENDACAO] Persistir configuracao de servidores em arquivo TOML no
+      diretorio de configuracao (diretrizes iguais aos temas e sessao):
+      ~/.nexus/servers.toml (ou config.toml extendida), com:
+      [server."rust-analyzer"]
+      command = "rust-analyzer"
+      args = []
+      languages = ["Rust"]
+      capabilities = ["completion","hover","goto_definition",...]
+      restart_on_crash = false
+
+================================================================================
+4. CONVERSAO CORRETA ENTRE POSICOES INTERNA E UTF-16
+================================================================================
+
+4.1 Regras empiricas
+--------------------
+[FATO] Nexus: offsets no domain de caracteres Unicode (escalar).
+[FATO] LSP: Position { line, character }, character = UTF-16 code unit.
+[FATO] Rust str: UTF-8; char.len_utf16() = 1 para a maioria dos
+      caracteres, = 2 para caracteres do plano multigoal (emoji,
+      histricos, etc.).
+[FATO] Nao existem "lone surrogates" em str valido (Rust garante que
+      o texto e UTF-8 valido).
+
+4.2 Metodo proposto (implementar em nexus-lsp/src/position.rs)
+-------------------------------------------------------------
+- char_offset_to_utf16(text, CharOffset): percorre chars ate o offset,
+  somando char.len_utf16() de cada char.
+- utf16_offset_to_char(text, u32): avanca por chars, acumulando unidades
+  UTF-16 ate alcançar o alvo; retorna CharOffset.
+- char_len_to_utf16(len_chars): ultrapassando para um documento.
+- position_from_line_character(text, line, u32 character): usa
+  line_of_char + conversao dentro da linha.
+- location_to_position / position_to_location: opera sobre o texto do
+  documento.
+
+4.3 Cuidados especiais
+----------------------
+[PROCEDimento] Certifique-se de que os testes cobrem:
+- ASCII (todos 1 unidade).
+- "café" (e com acento, 1 unidade).
+- "界" (CJK, 1 unidade, mas largura dupla na UI).
+- "😀" ou qualquer emoji (2 unidades UTF-16).
+- offset no final do documento (offset == len_chars).
+- CRLF: trate \r\n como um unico fim de linha, e nao conte \r como
+  caracter separado na conversao.
+- Linhas vazias e caracteres de tabuacao.
+
+4.4 Envio de texto
+------------------
+[PROCEDUTO] O texto do documento e enviado como JSON UTF-8 (os codepoints
+      mapeiam 1:1). A conversao UTF-16 e obrigatoria apenas para
+      Position (character). Em etapas futuras, e possivel suportar
+      textDocument/positionEncoding para servidores que querem codigos
+      explcitos UTF-16.
+
+================================================================================
+5. SINCRONIZACAO DE DOCUMENTOS E CONTROLE DE VERSOES
+================================================================================
+
+5.1 Identidade de documento
+---------------------------
+[FATO] Document path eh canonizado em open/save/set_path.
+      (canonicalize em open_document, save_document_to, set_path).
+[RECOMENDACAO] A URI do documento para LSP = conversion de path para
+      file:// (deferido para etapas posteriores, mas o crivo do path
+      para uri eh obrigatorio).
+[RECOMENDACAO] Em Etapa 1, use um identificador interno (path absoluto
+      canonizado) como chave de documento no registry do LSP.
+
+5.2 Versao do documento
+-----------------------
+[FATO] Buffer::revision() NÃO e monotonico: undo() volta para
+      revision_before. [FATO, buffer/mod.rs:484-485]
+[RECOMENDACAO] Manter um contador independente "version" (u64)
+      por documento, incrementado em todo envio (didOpen=1,
+      didChange=version+1, etc.), armazenado no LspWorkspace/client,
+      nao no buffer.
+[RECOMENDACAO] Nao usar Buffer::revision como LSP version.
+
+5.3 Estrategia de sincronizacao
+-------------------------------
+[STACK] (a) textDocument/didOpen: na abertura do arquivo (version=1).
+      (b) textDocument/didChange: a cada edicao confirmada (version++
+          e TextDocumentContentChangeEvent range/rangeLength/text).
+      (c) textDocument/didSave: no save() (apenas se server suportar).
+      (d) textDocument/didClose: na conclusao do documento.
+[PROCEDIMO] Envio ativo apos commit_session; nao aguardar resposta
+      antes de continuar a interface.
+[PROCEDIMO] Full sync opicional: em seguida de reload ou se o servidor
+      pedir reenvio, reenviar o texto completo.
+
+5.4 Conflitos e modificacao externa
+------------------------------------
+[FATO] App expoe has_conflict() e recovered flags.
+[FATO] watcher::detect_change compara fingerprint (len+hash) do disco.
+[NOTA] A LSP nao eh notificada automaticamente de alteracoes externas.
+      O cliente decide: apenas enviar do usuario; opcionalmente
+      "reload" para o servidor quando o usuario usar Ctrl+R.
+[RECOMENDACAO] Em Etapa 1, nao enviar didChange em conflito;
+      aguardar explicitamente a decisao do usuario.
+
+================================================================================
+6. CICLO DE VIDA DOS SERVEORES DE LINGUAGEM
+================================================================================
+
+[RECOMENDACAO] Sempre iniciar servidores externos via spawn com STDIO:
+- stdout pipe (JSON-RPC).
+- stderr pipe (log do servidor, nao saida do protocolo).
+- stdin pipe (escrita de requisicoes/notificacoes).
+- aguardar handshake: getProcessId, enviar initialize e aguardar resposta.
+
+[ESTAGIO] Inicializacao (handshake)
+- send initialize com capabilities do cliente (completion, hover,
+  goto_definition, references, rename, code_action, formatting,
+  publication_diagnostics etc.), trace = "off", etc.
+- aguardar response "initialize".
+- enviar initialized (notificacao).
+- registrar todas as outras opcoes com registerCapability, se suportado.
+
+[ESTAGIO] Em funcao
+- manter um "lobby" de processos: um Server por linguagem/projeto.
+- aguardar death do processo (poll/wait) para tratar falhas.
+- quando o processo morrer: notificar App, registrar stderr capturado,
+  marcar documento "server died", opcionalmente reiniciar (flag
+  restart_on_crash).
+
+[ENCERRAMENTO] graceful shutdown
+- enviar shutdown, aguardar resposta, depois exit (notificao).
+- apos shutdown, matar o processo (kill), aguardar (wait) para evitar
+  zombies; no Unix, usar setpgid + matar o grupo (depois de testado).
+- no Windows, usar TerminateProcess + WaitForSingleObject.
+
+[SEM ORFAS] Nenhum processo deve escapar.
+- todos os pipes sao fechados no processo filho.
+- use std::process::Command::spawn + pipes; nao use shell
+  buzinas para evitar interpretao de caracteres.
+- em caso de colheita, matar e aguardar.
+
+[SEPARA CAO DE LOG] stderr do servidor nunca deve misturar com o
+      stdout da aplicacao; use buffer circular ou arquivos.
+
+[VALIDACAO] Mensagens recebidas:
+- json parse falho: descartar, log.
+- metodo desconhecido: log, ignorar.
+- response com id diferente da req atual: ignorar (resposta antiga).
+- timeout: descartar requisição e avisar.
+
+================================================================================
+7. INTEGRAÇAO COM DOCUMENTMANAGER SEM BLOQUEAR A TUI
+================================================================================
+
+[RECOMENDACAO] Nao modificar DocumentManager. A adicao do LSP deve ficar
+      na camada App (nexus-tui) + crate nexus-lsp.
+
+[Estrutura] App retem:
+- lsp_workspaces: HashMap<workspace_path, LspWorkspace>
+- LspWorkspace mantém: clients: HashMap<document_uri, LspClient>,
+  version counters, capability registry.
+
+[Ciclo de vida por documento]
+- open_document: registrar documento no LspWorkspace; decidir cliente
+  (por LanguageId); chamar client.start() se for o primeiro doc dessa
+  linguagem.
+- close_document: remover do registry; se sobrou cliente, mantê-lo;
+  se nao houver mais docs, destroi o cliente.
+- open_workspace: registrar o workspace e o hub de servidores.
+- switch_tab: invisibilidade do documento inativo; manter cliente vivo
+  (o servidor so pode estar sem o buffer, mas o client fica ativo).
+- save_document_to: chamar client.did_save().
+- restore_session: recriar hierarchy a partir do path de cada
+  Document.
+
+[Envio de edicao]
+- Apos commit_session (transacao do buffer concluida), chamar
+  lsp_notify_did_change(doc, version, text) do cliente.
+- Nao depender da View/Settings; usar Document::buffer e Document::path.
+
+[Threading]
+- Toda a comunicacao com o servidor fica em worker pool (Tokio) ou
+  thread do lado do cliente. O loop da TUI permanece dedicado a:
+  - poll (250ms) [event.rs:12]
+  - render com ratatui (terminal::Terminal)
+  - input (crossterm)
+- Nenhum método do DocumentManager roda no event loop; o bridge chama
+  methods do LspClient (que agem sobre canais/async).
+
+[Isolamento]
+- O buffer nunca é alterado por JSON-RPC do servidor: edicoes sao
+  feitas apenas via Buffer::apply_edit (que retorna Result).
+- Diagnosticos, hover e completacao vem do servidor para o store de
+  UI; a UI renderiza conforme vacilabilidade e focus de documento.
+
+================================================================================
+8. ESTRATEGIA DE TESTES, INCLUINDO SERVEORES SIMULADOS
+================================================================================
+
+[PRINCICIO] Nenhum teste pode depender do servidor real instalado.
+            Use servidores simulados (fakes).
+
+[Roteiro de testes por etapa]
+[Etapa 1] protocol + transport:
+- req/resp JSON-RPC validos: init, initialized, shutdown, exit,
+  didOpen, didChange, didSave, didClose, publishDiagnostics.
+- req/resp invalidos: JSON mal-formado, metodo desconhecido,
+  id diferente.
+- Tema de teste: distancia de escala "fake server" que aceita
+  mensagems e responde com respostas controladas.
+
+[Etapa 2] Cliente + Servidor:
+- inicio de processo com fake server (processo real): handshake,
+  initialize, initialized, shutdown OK.
+- timeout de request; cancelamento de req; respostas antigas.
+- server morre inesperadamente: detectar, notificar App, stderr
+  log, nao reiniciar (opcional).
+- zombie prevention: wait() apos kill; smarts de grupao
+  no Unix.
+
+[Etapa 3] Posicoes UTF-16:
+- casos de teste: ASCII, café, CJK, emoji, CRLF, offset final,
+  linhas vazias, tab.
+- roundtrip: char_offset -> utf16 -> char_offset deve ser igual.
+
+[Etapa 4] Integração com TUI:
+- DocumentManager + fake clients: abrir/fechar, alternar abas,
+  salvar, recuperação de sessao, without blocking event loop.
+- Verificar que 360 testes existentes continuam passando.
+
+[Etapa 5] UI:
+- renderizar diagnosticos com TestBackend (ratatui) sem panic.
+- atualizacoes de diagnostico no on_idle e update.
+
+[Etapa 6] Funcionalidades multiclientes:
+- mltiples servers simultaneos (diffrentes linguagens no mesmo proj);
+- cancelamento de reqs.
+- test against a real local server (rust-analyzer, python-lsp-server)
+  in integration sandbox.
+
+[Ci/CD]
+- build + test de Linux portável.
+- Windows: suporto por CI (criar job no CI). Cargo + Rust
+  disponivel na CI. Verify o cargo test.
+
+================================================================================
+9. RISCOS TECNICO E DECISAO ARQUITETURAL
+================================================================================
+
+[Risco] Event loop bloqueado por IO com servidor
+[Impacto] Alta (TUI congelada)
+[Medida] I/O com servidor so em worker/async; nao chamar blocks no loop.
+
+[Risco] Conversao UTF-16 incorreta
+[Impacto] Alta (posicao invalida, cursor off)
+[Medida] Unidades de teste abrangentes (seção 4.3); code review commit
+         audit para shifts/surrogates.
+
+[Risco] Server morre inesperadamente
+[Impacto] Medio (doc nao e sincronizado)
+[Medida] Monitor process; notificar App; stderr isolado; opcao
+         restart_on_crash=false default.
+
+[Risco] Resposta antiga sobrescreve a recente
+[Impacto] Alto (UI mostra dados velhos)
+[Medida] ID + sequence + timeout + invalidate on new request.
+
+[Risco] Panic no servidor
+[Impacto] Medio
+[Medida] stderr isolado; error reportada; nao propagar exception para
+         App.
+
+[Risco] STDOUT server nao e JSON-RPC
+[Impacto] Alto (protocolo quebrado)
+[Medida] Parse linha a linha; descartar e terminar o server.
+
+[Risco] Processo-orphan no Windows/Unix
+[Impacto] Alto
+[Medida] wait() apos kill; matar grupo no Unix (setpgid); testar no CI.
+
+[Risco] Buffer corrompido pelo servidor
+[Impacto] Baixo
+[Medida] Edicoes so via Buffer::apply_edit; RecoveryPending bloqueia UI.
+
+[Risco] Config global misturada com server
+[Impacto] Medio
+[Medida] Config de servidores em bloco proprio; nao na ThemeConfig.
+
+[Risco] Linguagem nao suportada
+[Impacto] Baixo
+[Medida] Fallback a texto simples; nao iniciar server para idioma
+         desconhecido.
+
+[Risco] A integridade da 1.4 e perdida
+[Impacto] Critico
+[Medida] Registro de cliente na App external; nao alterar
+         DocumentManager; tests de regressao 360 testes.
+
+================================================================================
+10. PLANO DE IMPLEMENTACAO DIVIDIDO EM ETAPAS PEQUENAS
+================================================================================
+
+Etapa 0 - Preparacao (aprovacao precede)
+- criar crates/nexus-lsp (Cargo.toml + src), adicionar dependencias
+  sugeridas (sem impacto nos tests existentes).
+- garantir workspace compila.
+
+Etapa 1 - Protocolo e transport
+- JSON-RPC 2.0 minimalista + STDIO.
+- Testes com servidor fake: init, initialized, shutdown, exit,
+  didOpen, didChange, didSave, didClose, publishDiagnostics.
+- Unidade de teste do parser de linha.
+
+Etapa 2 - Cliente e ciclo de vida
+- LspClient (request/response + timeouts + cancelamento).
+- LspServer (spawn, monitor, stderr isolado, shutdown, muerte,
+  sem zombie).
+- Testes de vida real com processo fake.
+
+Etapa 3 - Documentos e posicoes
+- Conversao UTF-16 (seccao 4.2) com unidades de teste abrangentes.
+- Registry: URI <=> Documento, version counters independentes.
+- Testes de convercao e roundtrip.
+
+Etapa 4 - Bridge com a TUI
+- Registration de clientes no App; open/close/switch/save.
+- Envio de didOpen/didChange/didSave/didClose.
+- publishDiagnostics -> store de diagnosticos.
+- Integracao com 360 tests existentes (regresso garantida).
+
+Etapa 5 - UI de diagnostics basico
+- Painel de diagnostics (linhas de erro/warning), no status/status
+  bar e nos eventos.
+- Testes de render (TestBackend) sem panic.
+
+Etapa 6 - Funcionalidades minimas
+- hover (nome do simbolo), go-to-definition (basic), references
+  (basic), code action (basic), formatting (server supported).
+- Camadas de capabilities por server.
+
+Etapa 7 - Configuracao de workspace e robustez
+- Config de servidores em TOML (binario, args, idiomas, capabilities,
+  restart_on_crash).
+- URIs file:// e resolucao de paths.
+- Diagnostico de falhas de servidor, sem congelar a app.
+
+Etapa 8 - Revisao e aceitacao
+- Multiples servers simultaneos; test com server real no sandbox.
+- cargo clippy, fmt, build release; suporto cross-platform (Linux/Windows).
+
+[Todos os passos] Verificar que 360 testes existentes continuam aprovados
+e que nenhum arquivo do projeto foi modificado.
+
+================================================================================
+11. RESUMO DAS DECISAO PRINCIPAL
+================================================================================
+
+1. [FATO] CNexus 1.4 e robusto: 360 testes, buffer por Ropey, posicao
+   por CharOffset, DocumentManager de abas, event loop single-thread.
+2. [FATO] Nenhum codigo LSP existe; o cambio de camada deve ser atraves
+   de registry no App, nao no DocumentManager.
+3. [RECOMENDACAO] Criar crates/nexus-lsp (independente de TUI) para
+   reutilizacao e teste.
+4. [RECOMENDACAO] JSON-RPC 2.0 + STDIO, implementacao manual com
+   serde_json + tokio; nao adicionar deps nessa etapa.
+5. [RECOMENDACAO] Convercao UTF-16 (Position) implementada em
+   nexus-lsp/src/position.rs: char offset em caratter Unicode,
+   character em unidades UTF-16 (len_utf16 por char).
+6. [RECOMENDACAO] Versao do documento: contador independente de
+   Buffer::revision (nao monotonico).
+7. [RECOMENDACAO] Sincronizacao: didOpen, didChange, didSave, didClose;
+   envio ativo apos commit_session.
+8. [RECOMENDACAO] Server lifecycle: spawn, handshake, monitor, shutdown
+   graceful, kill + wait, stderr isolado, sem zombie.
+9. [RECOMENDACAO] Bridge sem decoro do DocumentManager; I/O fora do
+   loop da TUI; buffer editado so via Buffer::apply_edit.
+10. [RECOMENDACAO] Testes com servidores simulados somente; sem deps de
+    servidor real. CI cross-platform.
+
+[OTIMIZACAO] Nenhum arquivo do projeto foi modificado. O relatorio acima
+   e a entrega unica (relatorio_auditoria_n15_lsp.txt). A criacao do
+   crate nexus-lsp e a implementacao dependem de aprovacao da Etapa 0.
+
+================================================================================
+FIM
+================================================================================

@@ -10,6 +10,7 @@
 
 use std::fmt;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use nexus_core::buffer::Buffer;
 use nexus_core::buffer::edit::BufferError;
@@ -18,6 +19,18 @@ use nexus_syntax::{LanguageId, SyntaxState};
 
 use crate::files::{self, FileError};
 use crate::view::View;
+
+static NEXT_DOCUMENT_ID: AtomicU64 = AtomicU64::new(1);
+
+/// Identidade efêmera e estável de uma instância de documento aberta.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct DocumentId(u64);
+
+impl DocumentId {
+    pub(crate) fn new() -> Self {
+        Self(NEXT_DOCUMENT_ID.fetch_add(1, Ordering::Relaxed))
+    }
+}
 
 #[derive(Debug)]
 pub enum DocumentError {
@@ -58,6 +71,7 @@ impl From<FileError> for DocumentError {
 /// Estado completo de um documento aberto.
 #[derive(Debug)]
 pub struct Document {
+    pub id: DocumentId,
     pub buffer: Buffer,
     pub view: View,
     pub path: Option<PathBuf>,
@@ -83,6 +97,7 @@ impl Document {
 
     pub fn from_text(name: impl Into<String>, text: &str) -> Self {
         Self {
+            id: DocumentId::new(),
             buffer: Buffer::from_text(text),
             view: View::new(),
             path: None,
@@ -107,6 +122,7 @@ impl Document {
         let _ = buffer.mark_unsaved();
 
         Self {
+            id: DocumentId::new(),
             buffer,
             view: View::new(),
             name: name.into(),
@@ -129,6 +145,7 @@ impl Document {
             LanguageId::from_path(&canonical).map(|language| SyntaxState::new(language, &text));
 
         Ok(Self {
+            id: DocumentId::new(),
             buffer: Buffer::from_text(&text),
             view: View::new(),
             name: document_name(&canonical),
@@ -381,18 +398,25 @@ impl DocumentManager {
     /// Remove um documento inativo. O índice precisa ser conceitual e não pode
     /// apontar para o ativo.
     pub fn close_inactive(&mut self, index: usize) -> bool {
+        self.take_inactive(index).is_some()
+    }
+
+    /// Remove um documento inativo e devolve o documento removido.
+    ///
+    /// O chamador usa o documento para limpar a cópia de recuperação
+    /// correspondente, evitando que uma aba fechada reapareça na próxima
+    /// inicialização.
+    pub fn take_inactive(&mut self, index: usize) -> Option<Document> {
         if index == self.active_index || index >= self.len() {
-            return false;
+            return None;
         }
 
         if index < self.active_index {
-            self.inactive.remove(index);
             self.active_index -= 1;
+            Some(self.inactive.remove(index))
         } else {
-            self.inactive.remove(index - 1);
+            Some(self.inactive.remove(index - 1))
         }
-
-        true
     }
 
     /// Remove o documento ativo e ativa o vizinho mais próximo.

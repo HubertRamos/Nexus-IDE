@@ -7,7 +7,6 @@ use unicode_width::UnicodeWidthChar;
 /// Largura de uma tabulação em células de terminal.
 pub const TAB_WIDTH: usize = 4;
 
-pub const HEADER_HEIGHT: u16 = 1;
 pub const STATUS_HEIGHT: u16 = 1;
 const MIN_GUTTER_DIGITS: usize = 2;
 
@@ -33,9 +32,10 @@ pub fn gutter_width(line_count: usize) -> u16 {
 pub fn editor_content_size(
     terminal_width: u16,
     terminal_height: u16,
+    header_height: u16,
     line_count: usize,
 ) -> (u16, u16) {
-    let rows = terminal_height.saturating_sub(HEADER_HEIGHT + STATUS_HEIGHT);
+    let rows = terminal_height.saturating_sub(header_height + STATUS_HEIGHT);
     let gutter = gutter_width(line_count).min(terminal_width);
     let rule = u16::from(terminal_width > gutter);
     let cols = terminal_width.saturating_sub(gutter).saturating_sub(rule);

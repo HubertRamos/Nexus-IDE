@@ -139,7 +139,7 @@ impl Explorer {
     pub fn new(root: impl Into<PathBuf>) -> Self {
         let mut explorer = Self {
             root: root.into(),
-            visible: true,
+            visible: false,
             width: DEFAULT_WIDTH,
             show_hidden: false,
             excludes: Vec::new(),

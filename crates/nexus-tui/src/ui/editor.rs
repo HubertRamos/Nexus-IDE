@@ -10,11 +10,18 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
 use crate::app::App;
+use crate::diagnostics::{self, ResolvedDiagnostic};
+use crate::document_sync::DiagnosticFreshness;
 use crate::theme::ThemeState;
 use crate::view::{char_width, gutter_width};
 
 pub(super) fn render(frame: &mut Frame, area: Rect, app: &App) {
     if area.is_empty() {
+        return;
+    }
+
+    if !app.has_open_documents() {
+        render_empty(frame, area, app);
         return;
     }
 
@@ -50,6 +57,16 @@ pub(super) fn render(frame: &mut Frame, area: Rect, app: &App) {
     let left = app.view().left_col();
     let cursor = app.view().cursor();
     let selection = app.view().selection_range();
+    let diagnostic_ranges = app
+        .path()
+        .and_then(|path| {
+            buffer
+                .text()
+                .ok()
+                .map(|text| (nexus_lsp::uri::path_to_uri(path), text))
+        })
+        .map(|(uri, text)| diagnostics::resolve_for_document(app.diagnostics(), &uri, &text))
+        .unwrap_or_default();
 
     let cursor_line = match buffer.line_of_char(cursor) {
         Ok(line) => line,
@@ -113,6 +130,7 @@ pub(super) fn render(frame: &mut Frame, area: Rect, app: &App) {
         cursor,
         cursor_line,
         selection,
+        diagnostics: diagnostic_ranges,
     };
 
     for line in top..visible_end {
@@ -146,6 +164,7 @@ struct RenderContext<'a> {
     cursor: CharOffset,
     cursor_line: usize,
     selection: Option<TextRange>,
+    diagnostics: Vec<ResolvedDiagnostic>,
 }
 
 fn render_line(context: &RenderContext<'_>, line: usize) -> Result<Line<'static>, BufferError> {
@@ -198,6 +217,14 @@ fn render_line(context: &RenderContext<'_>, line: usize) -> Result<Line<'static>
 
         if let Some(kind) = token_at(highlights, offset.0, &mut highlight_index) {
             style = style.fg(context.theme.syntax_color(kind));
+        }
+
+        if let Some(diagnostic) = diagnostic_for_offset(&context.diagnostics, offset.0) {
+            style = style.patch(
+                context
+                    .theme
+                    .diagnostic_style(diagnostic.severity, diagnostic.freshness),
+            );
         }
 
         if selected {
@@ -266,6 +293,24 @@ fn render_line(context: &RenderContext<'_>, line: usize) -> Result<Line<'static>
     Ok(Line::from(spans))
 }
 
+fn diagnostic_for_offset(
+    diagnostics: &[ResolvedDiagnostic],
+    offset: usize,
+) -> Option<&ResolvedDiagnostic> {
+    diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.start <= offset && offset < diagnostic.end)
+        .min_by_key(|diagnostic| {
+            (
+                diagnostics::severity_rank(diagnostic.severity),
+                (diagnostic.freshness != DiagnosticFreshness::Current) as u8,
+                diagnostic.end.saturating_sub(diagnostic.start),
+                diagnostic.source.as_deref().unwrap_or(""),
+                diagnostic.message.as_str(),
+            )
+        })
+}
+
 fn token_at(highlights: &[HighlightSpan], offset: usize, index: &mut usize) -> Option<TokenKind> {
     while *index < highlights.len() && highlights[*index].range.end.0 <= offset {
         *index += 1;
@@ -279,6 +324,35 @@ fn token_at(highlights: &[HighlightSpan], offset: usize, index: &mut usize) -> O
 
 fn cursor_style(style: Style, theme: &ThemeState) -> Style {
     style.patch(theme.cursor_style())
+}
+
+fn render_empty(frame: &mut Frame, area: Rect, app: &App) {
+    let theme = app.theme();
+    let height = area.height.min(3);
+    let y = area.y + area.height.saturating_sub(height) / 2;
+    let rect = Rect::new(area.x, y, area.width, height);
+
+    let hint = if app.workspace().is_some() {
+        "Ctrl+O abrir arquivo  ·  Ctrl+B Explorer"
+    } else {
+        "Ctrl+O abrir arquivo  ·  Ctrl+Shift+O / F3 abrir projeto"
+    };
+
+    let lines = vec![
+        Line::from(Span::styled(
+            "Nenhum documento aberto",
+            Style::new().fg(theme.muted()).add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+        Line::from(Span::styled(hint, Style::new().fg(theme.muted()))),
+    ];
+
+    frame.render_widget(
+        Paragraph::new(lines)
+            .alignment(Alignment::Center)
+            .style(Style::new().bg(theme.background())),
+        rect,
+    );
 }
 
 fn render_error(frame: &mut Frame, area: Rect, message: &str, theme: &ThemeState) {

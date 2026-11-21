@@ -5,6 +5,7 @@ members = [
     "crates/nexus-theme",
     "crates/nexus-syntax",
     "crates/nexus-tui",
+    "crates/nexus-lsp",
 ]
 
 [workspace.package]

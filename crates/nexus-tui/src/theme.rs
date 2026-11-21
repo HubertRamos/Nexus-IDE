@@ -1,5 +1,7 @@
 use std::env;
 
+use crate::document_sync::DiagnosticFreshness;
+use nexus_lsp::protocol::DiagnosticSeverity;
 use nexus_syntax::TokenKind;
 use nexus_theme::{LoadedThemes, Rgb, SyntaxTheme, ThemePaths, UiTheme, load_from_environment};
 use ratatui::style::{Color, Modifier, Style};
@@ -199,6 +201,36 @@ impl ThemeState {
         }
     }
 
+    /// Cor semântica baseada apenas nas cores do tema Nexus.
+    pub fn diagnostic_color(&self, severity: Option<DiagnosticSeverity>) -> Color {
+        match severity {
+            Some(DiagnosticSeverity::Error) => self.error(),
+            Some(DiagnosticSeverity::Warning) => self.warning(),
+            Some(DiagnosticSeverity::Information) => self.accent(),
+            Some(DiagnosticSeverity::Hint) | None => self.muted(),
+        }
+    }
+
+    pub fn diagnostic_style(
+        &self,
+        severity: Option<DiagnosticSeverity>,
+        freshness: DiagnosticFreshness,
+    ) -> Style {
+        let mut style = Style::new()
+            .fg(self.diagnostic_color(severity))
+            .add_modifier(Modifier::UNDERLINED);
+        style = match severity {
+            Some(DiagnosticSeverity::Error) => style.add_modifier(Modifier::BOLD),
+            Some(DiagnosticSeverity::Information) => style.add_modifier(Modifier::ITALIC),
+            Some(DiagnosticSeverity::Hint) | None => style.add_modifier(Modifier::DIM),
+            Some(DiagnosticSeverity::Warning) => style,
+        };
+        if freshness == DiagnosticFreshness::Unverified {
+            style = style.add_modifier(Modifier::DIM);
+        }
+        style
+    }
+
     ui_colors! {
         background,
         surface,
@@ -270,6 +302,35 @@ mod tests {
                 .add_modifier
                 .contains(Modifier::REVERSED)
         );
+    }
+
+    #[test]
+    fn diagnostic_styles_keep_severity_distinct_without_color() {
+        use nexus_lsp::protocol::DiagnosticSeverity as Severity;
+
+        let theme = ThemeState::builtin(ColorMode::NoColor);
+        let error = theme.diagnostic_style(Some(Severity::Error), DiagnosticFreshness::Current);
+        let warning = theme.diagnostic_style(Some(Severity::Warning), DiagnosticFreshness::Current);
+        let information =
+            theme.diagnostic_style(Some(Severity::Information), DiagnosticFreshness::Current);
+        let hint = theme.diagnostic_style(Some(Severity::Hint), DiagnosticFreshness::Current);
+        assert!(
+            error
+                .add_modifier
+                .contains(Modifier::UNDERLINED | Modifier::BOLD)
+        );
+        assert!(warning.add_modifier.contains(Modifier::UNDERLINED));
+        assert!(
+            information
+                .add_modifier
+                .contains(Modifier::UNDERLINED | Modifier::ITALIC)
+        );
+        assert!(
+            hint.add_modifier
+                .contains(Modifier::UNDERLINED | Modifier::DIM)
+        );
+        assert_ne!(error.add_modifier, warning.add_modifier);
+        assert_ne!(information.add_modifier, hint.add_modifier);
     }
 
     #[test]

@@ -2,9 +2,11 @@ use ropey::Rope;
 
 pub mod edit;
 mod history;
+pub mod lines;
 pub mod position;
 
 pub use history::Transaction;
+pub use lines::{LineRange, MoveDirection, MoveOutcome};
 
 use edit::{AppliedEdit, BufferError, Edit, TextRange};
 use history::History;

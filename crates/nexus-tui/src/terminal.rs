@@ -4,7 +4,10 @@ use std::sync::{Mutex, MutexGuard, TryLockError};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::crossterm::cursor::{Hide, Show};
-use ratatui::crossterm::event::{DisableMouseCapture, EnableMouseCapture};
+use ratatui::crossterm::event::{
+    DisableMouseCapture, EnableMouseCapture, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags,
+    PushKeyboardEnhancementFlags,
+};
 use ratatui::crossterm::execute;
 use ratatui::crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode as crossterm_disable_raw_mode,
@@ -12,6 +15,14 @@ use ratatui::crossterm::terminal::{
 };
 
 pub type Tui = Terminal<CrosstermBackend<Stdout>>;
+
+/// Ativa a desambiguação de teclas modificadas (Kitty/modifyOtherKeys).
+///
+/// Sem isso, terminais legados entregam `Ctrl+Shift+O` como o mesmo byte de
+/// `Ctrl+O`. A desambiguação preserva `SHIFT` onde o terminal a suporta, sem
+/// depender de eventos de liberação ou de códigos alternativos.
+const KEYBOARD_ENHANCEMENT_FLAGS: KeyboardEnhancementFlags =
+    KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES;
 
 /// Partes do terminal que podem precisar de restauração.
 ///
@@ -23,6 +34,7 @@ struct RestoreState {
     cursor_hidden: bool,
     alternate_screen: bool,
     mouse_capture: bool,
+    keyboard_enhancement: bool,
 }
 
 impl RestoreState {
@@ -32,11 +44,16 @@ impl RestoreState {
             cursor_hidden: false,
             alternate_screen: false,
             mouse_capture: false,
+            keyboard_enhancement: false,
         }
     }
 
     fn is_active(&self) -> bool {
-        self.raw_mode || self.cursor_hidden || self.alternate_screen || self.mouse_capture
+        self.raw_mode
+            || self.cursor_hidden
+            || self.alternate_screen
+            || self.mouse_capture
+            || self.keyboard_enhancement
     }
 
     /// Tenta restaurar todas as partes ativas, independentemente de falhas
@@ -46,6 +63,13 @@ impl RestoreState {
     /// Partes que falharem continuam marcadas para uma nova tentativa.
     fn restore(&mut self, ops: &mut impl TerminalOps) -> RestoreErrors {
         let mut errors = RestoreErrors::default();
+
+        if self.keyboard_enhancement {
+            match ops.pop_keyboard_enhancement() {
+                Ok(()) => self.keyboard_enhancement = false,
+                Err(error) => errors.keyboard_enhancement = Some(error),
+            }
+        }
 
         if self.raw_mode {
             match ops.disable_raw_mode() {
@@ -86,6 +110,7 @@ struct RestoreErrors {
     cursor: Option<io::Error>,
     alternate_screen: Option<io::Error>,
     mouse: Option<io::Error>,
+    keyboard_enhancement: Option<io::Error>,
 }
 
 impl RestoreErrors {
@@ -94,6 +119,7 @@ impl RestoreErrors {
             && self.cursor.is_none()
             && self.alternate_screen.is_none()
             && self.mouse.is_none()
+            && self.keyboard_enhancement.is_none()
     }
 
     fn into_result(self) -> io::Result<()> {
@@ -119,6 +145,9 @@ impl RestoreErrors {
         if let Some(error) = self.mouse {
             details.push(format!("mouse capture: {error}"));
         }
+        if let Some(error) = self.keyboard_enhancement {
+            details.push(format!("keyboard enhancement: {error}"));
+        }
 
         io::Error::other(details.join("; "))
     }
@@ -133,6 +162,7 @@ trait TerminalOps {
     fn show_cursor(&mut self) -> io::Result<()>;
     fn leave_alternate_screen(&mut self) -> io::Result<()>;
     fn disable_mouse_capture(&mut self) -> io::Result<()>;
+    fn pop_keyboard_enhancement(&mut self) -> io::Result<()>;
 }
 
 struct SystemOps;
@@ -152,6 +182,10 @@ impl TerminalOps for SystemOps {
 
     fn disable_mouse_capture(&mut self) -> io::Result<()> {
         execute!(io::stdout(), DisableMouseCapture)
+    }
+
+    fn pop_keyboard_enhancement(&mut self) -> io::Result<()> {
+        execute!(io::stdout(), PopKeyboardEnhancementFlags)
     }
 }
 
@@ -179,6 +213,26 @@ fn try_lock_state() -> Option<MutexGuard<'static, RestoreState>> {
 pub struct TerminalSession {
     restore: RestoreGuard,
     terminal: Tui,
+}
+
+/// Suspende e retoma o terminal em torno de um diálogo externo.
+///
+/// A abstração permite que o fluxo do seletor seja testado sem abrir um
+/// diálogo gráfico real. A implementação de produção continua centralizada em
+/// [`TerminalSession`], reutilizando [`restore_terminal`] e a ativação comum.
+pub trait TerminalLifecycle {
+    fn suspend(&mut self) -> io::Result<()>;
+    fn resume(&mut self) -> io::Result<()>;
+}
+
+impl TerminalLifecycle for TerminalSession {
+    fn suspend(&mut self) -> io::Result<()> {
+        restore_terminal()
+    }
+
+    fn resume(&mut self) -> io::Result<()> {
+        resume_terminal(&mut self.terminal)
+    }
 }
 
 impl TerminalSession {
@@ -251,6 +305,32 @@ impl<R: RestoreRuntime> Drop for RestoreGuard<R> {
 /// pode ocorrer depois de a sequência já ter sido parcialmente escrita. Em
 /// qualquer falha, a restauração é tentada e o erro original é preservado.
 pub fn init() -> io::Result<TerminalSession> {
+    activate_terminal()?;
+
+    let backend = CrosstermBackend::new(io::stdout());
+
+    match Terminal::new(backend) {
+        Ok(terminal) => Ok(TerminalSession {
+            restore: RestoreGuard::new(SystemRestore),
+            terminal,
+        }),
+        Err(error) => Err(cleanup_after_error(error)),
+    }
+}
+
+/// Reativa as partes do terminal usadas pela interface.
+///
+/// É a operação inversa de [`restore_terminal`] e é compartilhada pela
+/// inicialização e pela retomada depois de um diálogo. Em caso de falha, tenta
+/// restaurar o que já foi ativado e devolve o erro original.
+fn activate_terminal() -> io::Result<()> {
+    match activate_terminal_parts() {
+        Ok(()) => Ok(()),
+        Err(error) => Err(cleanup_after_error(error)),
+    }
+}
+
+fn activate_terminal_parts() -> io::Result<()> {
     crossterm_enable_raw_mode()?;
 
     {
@@ -262,40 +342,49 @@ pub fn init() -> io::Result<TerminalSession> {
 
     {
         let mut state = lock_state();
+        state.keyboard_enhancement = true;
+    }
+
+    execute!(
+        stdout,
+        PushKeyboardEnhancementFlags(KEYBOARD_ENHANCEMENT_FLAGS)
+    )?;
+
+    {
+        let mut state = lock_state();
         state.alternate_screen = true;
     }
 
-    if let Err(error) = execute!(stdout, EnterAlternateScreen) {
-        return Err(cleanup_after_error(error));
-    }
+    execute!(stdout, EnterAlternateScreen)?;
 
     {
         let mut state = lock_state();
         state.cursor_hidden = true;
     }
 
-    if let Err(error) = execute!(stdout, Hide) {
-        return Err(cleanup_after_error(error));
-    }
+    execute!(stdout, Hide)?;
 
     {
         let mut state = lock_state();
         state.mouse_capture = true;
     }
 
-    if let Err(error) = execute!(stdout, EnableMouseCapture) {
-        return Err(cleanup_after_error(error));
-    }
+    execute!(stdout, EnableMouseCapture)?;
 
-    let backend = CrosstermBackend::new(stdout);
+    Ok(())
+}
 
-    match Terminal::new(backend) {
-        Ok(terminal) => Ok(TerminalSession {
-            restore: RestoreGuard::new(SystemRestore),
-            terminal,
-        }),
-        Err(error) => Err(cleanup_after_error(error)),
-    }
+/// Retoma a interface depois que um diálogo externo foi encerrado.
+///
+/// Antes de reativar raw mode, alternate screen, cursor oculto e captura de
+/// mouse, o terminal já deve ter sido suspenso com [`restore_terminal`]. O
+/// buffer é limpo para que a próxima renderização não reutilize conteúdo que
+/// ficou visível durante o diálogo.
+pub fn resume_terminal(terminal: &mut Tui) -> io::Result<()> {
+    activate_terminal()?;
+    terminal.autoresize()?;
+    terminal.clear()?;
+    Ok(())
 }
 
 /// Restaura cursor, raw mode e alternate screen, tentando todas as partes.
@@ -361,10 +450,12 @@ mod tests {
         cursor: VecDeque<io::Result<()>>,
         alternate_screen: VecDeque<io::Result<()>>,
         mouse: VecDeque<io::Result<()>>,
+        keyboard_enhancement: VecDeque<io::Result<()>>,
         raw_calls: usize,
         cursor_calls: usize,
         alternate_calls: usize,
         mouse_calls: usize,
+        keyboard_calls: usize,
     }
 
     impl TerminalOps for MockOps {
@@ -387,6 +478,11 @@ mod tests {
             self.mouse_calls += 1;
             self.mouse.pop_front().unwrap_or(Ok(()))
         }
+
+        fn pop_keyboard_enhancement(&mut self) -> io::Result<()> {
+            self.keyboard_calls += 1;
+            self.keyboard_enhancement.pop_front().unwrap_or(Ok(()))
+        }
     }
 
     fn failure(message: &str) -> io::Result<()> {
@@ -399,6 +495,7 @@ mod tests {
             cursor_hidden: true,
             alternate_screen: true,
             mouse_capture: true,
+            keyboard_enhancement: true,
         }
     }
 
@@ -457,6 +554,28 @@ mod tests {
         assert!(!state.raw_mode);
         assert!(!state.cursor_hidden);
         assert!(state.alternate_screen);
+    }
+
+    #[test]
+    fn keyboard_enhancement_failure_stays_retryable() {
+        let mut state = active_state();
+        let mut ops = MockOps {
+            keyboard_enhancement: VecDeque::from([failure("keyboard failure")]),
+            ..MockOps::default()
+        };
+
+        let errors = state.restore(&mut ops);
+
+        assert!(errors.keyboard_enhancement.is_some());
+        assert_eq!(ops.keyboard_calls, 1);
+        assert!(state.keyboard_enhancement);
+
+        let mut retry = MockOps::default();
+        let errors = state.restore(&mut retry);
+
+        assert!(errors.is_empty());
+        assert_eq!(retry.keyboard_calls, 1);
+        assert!(!state.keyboard_enhancement);
     }
 
     #[test]
@@ -525,6 +644,7 @@ mod tests {
             cursor: Some(io::Error::other("cursor failure")),
             alternate_screen: Some(io::Error::other("screen failure")),
             mouse: Some(io::Error::other("mouse failure")),
+            keyboard_enhancement: Some(io::Error::other("keyboard failure")),
         };
 
         let message = errors.into_io_error().to_string();
@@ -532,6 +652,7 @@ mod tests {
         assert!(message.contains("raw mode: raw mode failure"));
         assert!(message.contains("cursor: cursor failure"));
         assert!(message.contains("alternate screen: screen failure"));
+        assert!(message.contains("keyboard enhancement: keyboard failure"));
     }
 
     struct MockRuntime {

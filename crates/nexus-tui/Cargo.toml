@@ -8,11 +8,14 @@ license.workspace = true
 nexus-core = { path = "../nexus-core" }
 nexus-syntax = { path = "../nexus-syntax" }
 nexus-theme = { path = "../nexus-theme" }
+nexus-lsp = { path = "../nexus-lsp" }
 ratatui = { version = "0.30.2", default-features = false, features = ["crossterm"] }
 crossterm = "0.29.0"
+rfd = { version = "0.17.2", default-features = false, features = ["xdg-portal"] }
 unicode-width = "0.2"
 trash = "5"
 serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
 toml = "0.8"
 
 [dev-dependencies]

@@ -289,9 +289,9 @@ pub fn help_text() -> String {
          \x20 -V, --version             mostra a versão\n\
          \n\
          ATALHOS:\n\
-         \x20 Ctrl+O abrir arquivo      Ctrl+S salvar      Ctrl+Shift+S salvar como\n\
-         \x20 Ctrl+B explorador          Ctrl+W fechar aba  Ctrl+PageUp/PageDown abas\n\
-         \x20 Ctrl+H / F1 ajuda          Ctrl+Q sair\n",
+         \x20 Ctrl+O abrir arquivos     Ctrl+Shift+O / F3 abrir projeto   Ctrl+S salvar\n\
+         \x20 Ctrl+Shift+S salvar como  Ctrl+B explorador               Ctrl+Q fechar aba\n\
+         \x20 Ctrl+PageUp/PageDown abas Ctrl+H / F1 ajuda               Ctrl+Shift+Q sair\n",
         version = env!("CARGO_PKG_VERSION")
     )
 }
@@ -374,6 +374,9 @@ mod tests {
     #[test]
     fn opens_file_and_infers_parent_workspace() {
         let directory = TempDir::new("file");
+        // Cada teste declara o próprio marcador de projeto. Assim o resultado
+        // não depende de um `.git` acidental em `/tmp` ou em outro ancestral.
+        fs::create_dir(directory.join(".git")).unwrap();
         let file = directory.join("main.rs");
         fs::write(&file, "fn main() {}").unwrap();
 

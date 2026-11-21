@@ -1,0 +1,24 @@
+[package]
+name = "nexus-lsp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+# Protocolo JSON-RPC 2.0 e tipos do LSP usam serialização estruturada.
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+# Runtime assíncrono mínimo para: I/O sobre STDIO (`io-util`), processos
+# filhos (`process`), tarefas/executor (`rt`), canais internos (`sync`),
+# `select!` nos testes e no loop de transporte (`macros`) e prazos de
+# handshake/encerramento (`time`).
+tokio = { version = "1", features = ["io-util", "macros", "process", "rt", "sync", "time"] }
+
+# Binário de apoio aos testes de ciclo de vida. Não é instalado nem usado
+# pela aplicação; existe para validar o gerenciamento contra um servidor LSP
+# simulado, sem depender de rust-analyzer ou Pyright.
+[[bin]]
+name = "nexus-lsp-fake-server"
+path = "tests/support/fake_server.rs"
+test = false
+doc = false

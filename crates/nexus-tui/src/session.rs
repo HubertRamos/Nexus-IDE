@@ -52,7 +52,7 @@ impl Default for Session {
             documents: Vec::new(),
             active: 0,
             explorer: ExplorerSession {
-                visible: true,
+                visible: false,
                 width: crate::explorer::DEFAULT_WIDTH,
                 show_hidden: false,
                 expanded: Vec::new(),
