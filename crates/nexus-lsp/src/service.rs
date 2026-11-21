@@ -708,6 +708,89 @@ async fn handle_command<P>(
     }
 }
 
+fn start_completion(
+    operation_id: CompletionOperationId,
+    workspace: String,
+    language_id: String,
+    uri: String,
+    position: Position,
+    trigger_kind: u8,
+    trigger_character: Option<String>,
+    pool: &ServerPool,
+    events: &Sender<ServiceEvent>,
+) {
+    let key = ServerKey::new(&workspace, &language_id);
+    let Some(server) = pool.get(&key) else {
+        let _ = events.send(ServiceEvent::CompletionCompleted {
+            operation_id, workspace, language_id, uri,
+            document_version: None,
+            result: Err("sessão LSP indisponível".to_owned()),
+        });
+        return;
+    };
+
+    let document_version = server.document_version(&uri);
+    let finish_error = |message: String| {
+        let _ = events.send(ServiceEvent::CompletionCompleted {
+            operation_id,
+            workspace: workspace.clone(),
+            language_id: language_id.clone(),
+            uri: uri.clone(),
+            document_version,
+            result: Err(message),
+        });
+    };
+
+    if !supports_completion(server.capabilities()) {
+        finish_error("servidor LSP não oferece completion".to_owned());
+        return;
+    }
+
+    let params = CompletionParams {
+        text_document: TextDocumentIdentifier { uri: uri.clone() },
+        position,
+        context: Some(CompletionContext {
+            trigger_kind,
+            trigger_character,
+        }),
+    };
+    let params = match serde_json::to_value(params) {
+        Ok(params) => params,
+        Err(error) => {
+            finish_error(format!("parâmetros de completion inválidos: {error}"));
+            return;
+        }
+    };
+    let pending = match server.begin_navigation_request(
+        "textDocument/completion",
+        Some(params),
+    ) {
+        Ok(pending) => pending,
+        Err(error) => {
+            finish_error(error.to_string());
+            return;
+        }
+    };
+
+    let timeout = server.navigation_timeout();
+    let events = events.clone();
+    tokio::spawn(async move {
+        let result = match pending.wait(timeout).await {
+            Ok(value) => serde_json::from_value::<Option<CompletionResponse>>(value)
+                .map_err(|error| format!("resposta de completion inválida: {error}")),
+            Err(error) => Err(error.to_string()),
+        };
+        let _ = events.send(ServiceEvent::CompletionCompleted {
+            operation_id,
+            workspace,
+            language_id,
+            uri,
+            document_version,
+            result,
+        });
+    });
+}
+
 fn start_navigation(
     request: NavigationRequestInput,
     pool: &ServerPool,
