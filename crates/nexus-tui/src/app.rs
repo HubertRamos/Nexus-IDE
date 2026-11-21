@@ -2489,6 +2489,16 @@ impl App {
                     return;
                 }
 
+                if self.mode == Mode::Editor
+                    && key.kind != ratatui::crossterm::event::KeyEventKind::Release
+                    && key.modifiers.contains(ratatui::crossterm::event::KeyModifiers::CONTROL)
+                    && key.code == ratatui::crossterm::event::KeyCode::Char(' ')
+                {
+                    self.commit_session();
+                    self.request_completion(1, None);
+                    return;
+                }
+
                 if self.mode == Mode::Editor && self.handle_completion_key(key) {
                     return;
                 }
