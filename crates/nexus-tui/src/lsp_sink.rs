@@ -14,7 +14,9 @@ use std::collections::{BTreeMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use nexus_lsp::service::{LspService, NavigationCompletion, ServiceEvent};
+use nexus_lsp::service::{CompletionOperationId, LspService, NavigationCompletion, ServiceEvent};
+use nexus_lsp::completion::CompletionResponse;
+use nexus_lsp::protocol::Position;
 
 use crate::document_sync::{
     ChangeSet, DiagnosticFreshness, DiagnosticsKey, StoredDiagnostics, SyncEvent, SyncSink,
@@ -31,6 +33,16 @@ struct DocumentRoute {
     text: String,
 }
 
+/// Resultado de uma solicitação de completion, com versão para descartar
+/// respostas que chegaram depois de uma edição mais recente.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CompletionResult {
+    pub operation_id: CompletionOperationId,
+    pub uri: String,
+    pub document_version: Option<i64>,
+    pub result: Result<Option<CompletionResponse>, String>,
+}
+
 /// Sink concreto usado pela aplicação.
 pub struct LspSyncSink {
     service: LspService,
@@ -40,6 +52,7 @@ pub struct LspSyncSink {
     diagnostics: BTreeMap<DiagnosticsKey, StoredDiagnostics>,
     sessions: BTreeMap<(String, String), i64>,
     navigation_results: VecDeque<NavigationCompletion>,
+    completion_results: VecDeque<CompletionResult>,
     pending_notices: VecDeque<String>,
 }
 
@@ -66,6 +79,7 @@ impl LspSyncSink {
             diagnostics: BTreeMap::new(),
             sessions: BTreeMap::new(),
             navigation_results: VecDeque::new(),
+            completion_results: VecDeque::new(),
             pending_notices: VecDeque::new(),
         }
     }
@@ -227,6 +241,33 @@ impl SyncSink for LspSyncSink {
         self.service.cancel_navigation(operation_id);
     }
 
+    /// Solicita completion para um documento já roteado ao serviço LSP.
+    pub fn request_completion(
+        &mut self,
+        path: &Path,
+        position: Position,
+        trigger_kind: u8,
+        trigger_character: Option<String>,
+    ) -> Option<CompletionOperationId> {
+        let route = self.routes.get(path)?;
+        let uri = nexus_lsp::uri::path_to_uri(path);
+        Some(self.service.request_completion(
+            route.workspace.clone(),
+            route.language_id.clone(),
+            uri,
+            position,
+            trigger_kind,
+            trigger_character,
+        ))
+    }
+
+    /// Drena resultados de completion recebidos do servidor.
+    pub fn drain_completion_results(&mut self) -> Vec<CompletionResult> {
+        let notices = self.poll_service_events();
+        self.pending_notices.extend(notices);
+        std::mem::take(&mut self.completion_results).into_iter().collect()
+    }
+
     fn current_session_id(&mut self, workspace: &str, language_id: &str) -> Option<i64> {
         let notices = self.poll_service_events();
         self.pending_notices.extend(notices);
@@ -245,6 +286,7 @@ impl SyncSink for LspSyncSink {
         self.routes.clear();
         self.diagnostics.clear();
         self.navigation_results.clear();
+        self.completion_results.clear();
         self.pending_notices.clear();
         self.service.shutdown();
     }
@@ -324,6 +366,13 @@ impl LspSyncSink {
                 ServiceEvent::NavigationCompleted { context, outcome } => {
                     self.navigation_results
                         .push_back(NavigationCompletion { context, outcome });
+                }
+                ServiceEvent::CompletionCompleted {
+                    operation_id, uri, document_version, result, ..
+                } => {
+                    self.completion_results.push_back(CompletionResult {
+                        operation_id, uri, document_version, result,
+                    });
                 }
                 ServiceEvent::Stopped => {}
             }
