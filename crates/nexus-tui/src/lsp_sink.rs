@@ -14,7 +14,6 @@ use std::collections::{BTreeMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use nexus_lsp::completion::CompletionResponse;
 use nexus_lsp::protocol::Position;
 use nexus_lsp::service::{CompletionOperationId, LspService, NavigationCompletion, ServiceEvent};
 
