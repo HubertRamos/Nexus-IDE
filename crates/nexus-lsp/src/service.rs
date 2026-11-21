@@ -38,6 +38,7 @@ use std::time::Duration;
 use tokio::runtime::Builder;
 use tokio::sync::mpsc::{self as tokio_mpsc, UnboundedReceiver, UnboundedSender};
 
+use crate::completion::{CompletionContext, CompletionParams, CompletionResponse, supports_completion};
 use crate::languages::{PYTHON_LANGUAGE_ID, RUST_LANGUAGE_ID, pyright, rust_analyzer};
 use crate::manager::{
     NavigationCancellation, ServerConfig, ServerError, ServerEvent, ServerStatus,
@@ -51,6 +52,10 @@ use crate::uri::path_to_uri;
 
 /// Intervalo de drenagem de eventos dos servidores quando não há comandos.
 const EVENT_POLL_INTERVAL: Duration = Duration::from_millis(50);
+/// Identidade estável de uma operação de completion solicitada pelo consumidor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct CompletionOperationId(pub u64);
+
 /// Identidade estável de uma operação de navegação solicitada pelo consumidor.
 /// O identificador é escopado à instância de [`LspService`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -153,6 +158,15 @@ pub enum ServiceEvent {
         context: NavigationRequestContext,
         outcome: NavigationOutcome,
     },
+    /// Sugestões de completion para um documento e posição específicos.
+    CompletionCompleted {
+        operation_id: CompletionOperationId,
+        workspace: String,
+        language_id: String,
+        uri: String,
+        document_version: Option<i64>,
+        result: Result<Option<CompletionResponse>, String>,
+    },
     /// Um processo foi iniciado para o par `(workspace, linguagem)`.
     ServerStarted {
         workspace: String,
@@ -212,6 +226,15 @@ enum Command {
         language_id: String,
     },
     Navigate(NavigationRequestInput),
+    Complete {
+        operation_id: CompletionOperationId,
+        workspace: String,
+        language_id: String,
+        uri: String,
+        position: Position,
+        trigger_kind: u8,
+        trigger_character: Option<String>,
+    },
     CancelNavigation(NavigationOperationId),
     Shutdown,
 }
@@ -234,6 +257,7 @@ pub struct LspService {
     events: Receiver<ServiceEvent>,
     thread: Option<JoinHandle<()>>,
     next_navigation_id: AtomicU64,
+    next_completion_id: AtomicU64,
 }
 
 impl LspService {
@@ -263,6 +287,7 @@ impl LspService {
             events: event_receiver,
             thread: Some(thread),
             next_navigation_id: AtomicU64::new(1),
+            next_completion_id: AtomicU64::new(1),
         })
     }
 
@@ -376,6 +401,33 @@ impl LspService {
                 uri: uri.into(),
                 position,
             }));
+        operation_id
+    }
+
+    /// Solicita completion sem bloquear a thread da TUI.
+    ///
+    /// trigger_kind: 1 = invocado manualmente, 2 = caractere de gatilho,
+    /// 3 = continuação de uma lista incompleta.
+    pub fn request_completion(
+        &self,
+        workspace: impl Into<String>,
+        language_id: impl Into<String>,
+        uri: impl Into<String>,
+        position: Position,
+        trigger_kind: u8,
+        trigger_character: Option<String>,
+    ) -> CompletionOperationId {
+        let operation_id =
+            CompletionOperationId(self.next_completion_id.fetch_add(1, Ordering::Relaxed));
+        let _ = self.commands.send(Command::Complete {
+            operation_id,
+            workspace: workspace.into(),
+            language_id: language_id.into(),
+            uri: uri.into(),
+            position,
+            trigger_kind,
+            trigger_character,
+        });
         operation_id
     }
 
@@ -632,6 +684,14 @@ async fn handle_command<P>(
         }
         Command::Navigate(request) => {
             start_navigation(request, pool, active_navigation, completion_sender, events)
+        }
+        Command::Complete {
+            operation_id, workspace, language_id, uri, position, trigger_kind, trigger_character,
+        } => {
+            start_completion(
+                operation_id, workspace, language_id, uri, position,
+                trigger_kind, trigger_character, pool, events,
+            );
         }
         Command::CancelNavigation(operation_id) => {
             let cancelled = active_navigation
