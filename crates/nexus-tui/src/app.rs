@@ -5886,6 +5886,13 @@ mod tests {
         app.update(Event::Key(shift(code)));
     }
 
+    fn press_ctrl_shift(app: &mut App, code: KeyCode) {
+        app.update(Event::Key(KeyEvent::new(
+            code,
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+        )));
+    }
+
     fn press_alt(app: &mut App, code: KeyCode) {
         app.update(Event::Key(KeyEvent::new(code, KeyModifiers::ALT)));
     }
@@ -6185,16 +6192,17 @@ mod tests {
 
     #[test]
     fn shift_tab_outdents_selection_and_current_line() {
-        let mut app = app("\talpha\n    beta\nnone");
-        app.view
-            .set_selection(&app.buffer, CharOffset(0), CharOffset(15))
+        let mut selected = app("\talpha\n    beta\nnone");
+        selected
+            .view
+            .set_selection(&selected.buffer, CharOffset(0), CharOffset(15))
             .unwrap();
 
-        press_shift(&mut app, KeyCode::Tab);
+        press_shift(&mut selected, KeyCode::Tab);
 
-        assert_eq!(text(&app), "alpha\nbeta\nnone");
+        assert_eq!(text(&selected), "alpha\nbeta\nnone");
         assert_eq!(
-            app.view.selection_range(),
+            selected.view.selection_range(),
             Some(TextRange::new(CharOffset(0), CharOffset(10)))
         );
 
@@ -6211,15 +6219,15 @@ mod tests {
 
     #[test]
     fn enter_auto_indents_and_preserves_crlf() {
-        let mut app = app("    code");
-        app.view
-            .set_cursor(&app.buffer, CharOffset(8))
+        let mut unix = app("    code");
+        unix.view
+            .set_cursor(&unix.buffer, CharOffset(8))
             .unwrap();
 
-        press(&mut app, KeyCode::Enter);
-        press(&mut app, KeyCode::Char('x'));
+        press(&mut unix, KeyCode::Enter);
+        press(&mut unix, KeyCode::Char('x'));
 
-        assert_eq!(text(&app), "    code\n    x");
+        assert_eq!(text(&unix), "    code\n    x");
 
         let mut crlf = app("    a\r\n    b\r\n");
         crlf.view
