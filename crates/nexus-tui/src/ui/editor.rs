@@ -191,6 +191,7 @@ fn render_completion_popup(frame: &mut Frame, area: Rect, app: &App) {
     let popup = Rect::new(x, y, width, height);
     frame.render_widget(Clear, popup);
 
+    let theme = app.theme();
     let visible_rows = height.saturating_sub(2) as usize;
     let offset = completion.selected().saturating_sub(visible_rows.saturating_sub(1));
     let lines: Vec<Line> = completion.items().iter().enumerate()
