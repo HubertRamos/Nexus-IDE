@@ -6360,14 +6360,14 @@ mod tests {
 
     #[test]
     fn tab_indents_a_reversed_selection_and_preserves_its_direction() {
-        let mut app = app("alpha\\nbeta\\ngamma");
+        let mut app = app("alpha\nbeta\ngamma");
         app.view
             .set_selection(&app.buffer, CharOffset(10), CharOffset(0))
             .unwrap();
 
         press(&mut app, KeyCode::Tab);
 
-        assert_eq!(text(&app), "\\talpha\\n\\tbeta\\ngamma");
+        assert_eq!(text(&app), "\talpha\n\tbeta\ngamma");
         assert_eq!(app.view().cursor(), CharOffset(1));
         assert_eq!(
             app.view.selection_range(),
@@ -6377,14 +6377,14 @@ mod tests {
 
     #[test]
     fn duplicate_preserves_a_reversed_block_selection_in_the_copy() {
-        let mut app = app("one\\ntwo\\nthree");
+        let mut app = app("one\ntwo\nthree");
         app.view
             .set_selection(&app.buffer, CharOffset(7), CharOffset(0))
             .unwrap();
 
         press_ctrl_shift(&mut app, KeyCode::Char('D'));
 
-        assert_eq!(text(&app), "one\\ntwo\\none\\ntwo\\nthree");
+        assert_eq!(text(&app), "one\ntwo\none\ntwo\nthree");
         assert_eq!(app.view().cursor(), CharOffset(8));
         assert_eq!(
             app.view.selection_range(),
@@ -6394,20 +6394,20 @@ mod tests {
             app.buffer
                 .slice(app.view.selection_range().unwrap())
                 .unwrap(),
-            "one\\ntwo"
+            "one\ntwo"
         );
     }
 
     #[test]
     fn moving_a_reversed_block_selection_preserves_its_direction() {
-        let mut app = app("one\\ntwo\\nthree");
+        let mut app = app("one\ntwo\nthree");
         app.view
             .set_selection(&app.buffer, CharOffset(7), CharOffset(0))
             .unwrap();
 
         press_alt(&mut app, KeyCode::Down);
 
-        assert_eq!(text(&app), "three\\none\\ntwo");
+        assert_eq!(text(&app), "three\none\ntwo");
         assert_eq!(app.view().cursor(), CharOffset(6));
         assert_eq!(
             app.view.selection_range(),
@@ -6417,7 +6417,7 @@ mod tests {
             app.buffer
                 .slice(app.view.selection_range().unwrap())
                 .unwrap(),
-            "one\\ntwo"
+            "one\ntwo"
         );
     }
 
