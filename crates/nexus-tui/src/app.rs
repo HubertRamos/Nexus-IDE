@@ -37,8 +37,11 @@ use crate::theme::{ColorMode, ThemeState};
 use crate::view::{Motion, TAB_WIDTH, View, char_width, editor_content_size};
 use crate::watcher::{DetectedChange, FileFingerprint, FileWatcher, fingerprint};
 use crate::workspace::Workspace;
+use nexus_lsp::completion::CompletionItem;
 use nexus_lsp::protocol::{NavigationMethod, NavigationTarget, Position};
-use nexus_lsp::service::{NavigationCompletion, NavigationOperationId, NavigationOutcome};
+use nexus_lsp::service::{
+    CompletionOperationId, NavigationCompletion, NavigationOperationId, NavigationOutcome,
+};
 
 /// Colunas mínimas reservadas ao editor quando a sidebar está visível.
 const MIN_EDITOR_WIDTH: u16 = 20;
@@ -130,6 +133,31 @@ pub struct NavigationChoice {
     pub line: u32,
     pub column: u32,
     pub context: Option<String>,
+}
+
+/// Sugestões de completion atualmente apresentadas no editor.
+#[derive(Debug, Clone)]
+pub struct CompletionPopup {
+    items: Vec<CompletionItem>,
+    selected: usize,
+}
+
+impl CompletionPopup {
+    pub fn items(&self) -> &[CompletionItem] { &self.items }
+    pub fn selected(&self) -> usize { self.selected }
+
+    fn move_selection(&mut self, delta: isize) {
+        if self.items.is_empty() { self.selected = 0; return; }
+        self.selected = (self.selected as isize + delta)
+            .clamp(0, self.items.len().saturating_sub(1) as isize) as usize;
+    }
+}
+
+struct PendingCompletion {
+    operation_id: CompletionOperationId,
+    uri: String,
+    document_id: DocumentId,
+    revision: u64,
 }
 
 /// Lista modal de destinos para navegações com mais de um resultado.
@@ -613,6 +641,9 @@ pub struct App {
     /// Ratatui; o sink é fornecido pela camada de integração.
     document_sync: DocumentSyncBridge,
     diagnostics: Vec<StoredDiagnostics>,
+    completion_popup: Option<CompletionPopup>,
+    pending_completion: Option<PendingCompletion>,
+    completion_trigger: Option<(u8, Option<String>)>,
     navigation_operations: NavigationOperationRegistry,
     /// Operação de definição iniciada pela interface e ainda não aplicada.
     active_navigation: Option<NavigationOperationId>,
@@ -788,6 +819,9 @@ impl App {
             syntax: None,
             document_sync: DocumentSyncBridge::new(),
             diagnostics: Vec::new(),
+            completion_popup: None,
+            pending_completion: None,
+            completion_trigger: None,
             navigation_operations: NavigationOperationRegistry::default(),
             active_navigation: None,
             navigation_chooser: None,
@@ -814,6 +848,10 @@ impl App {
     #[allow(dead_code)] // ponto de leitura usado pela próxima fase visual
     pub fn diagnostics(&self) -> &[StoredDiagnostics] {
         &self.diagnostics
+    }
+
+    pub fn completion_popup(&self) -> Option<&CompletionPopup> {
+        self.completion_popup.as_ref()
     }
 
     #[cfg(test)]
@@ -925,6 +963,122 @@ impl App {
         // (por exemplo, ao retomar uma sessão). Reenvia o estado atual para
         // não deixar buffers sem `didOpen`.
         self.sync_all_open();
+    }
+
+    /// Agenda uma solicitação de completion para depois da sincronização da edição.
+    fn schedule_completion(&mut self, trigger_kind: u8, trigger_character: Option<String>) {
+        self.completion_popup = None;
+        self.completion_trigger = Some((trigger_kind, trigger_character));
+    }
+
+    fn clear_completion(&mut self) {
+        self.completion_popup = None;
+        self.pending_completion = None;
+        self.completion_trigger = None;
+    }
+
+    fn request_completion(&mut self, trigger_kind: u8, trigger_character: Option<String>) {
+        let Some(path) = self.path.clone() else { return; };
+        let Ok(text) = self.buffer.text() else { return; };
+        let Ok(position) = nexus_lsp::utf16::position_from_offset(&text, self.view.cursor().0) else {
+            return;
+        };
+        let uri = nexus_lsp::uri::path_to_uri(&path);
+        let Some(operation_id) = self.document_sync.request_completion(
+            &path, position, trigger_kind, trigger_character,
+        ) else { return; };
+        self.pending_completion = Some(PendingCompletion {
+            operation_id,
+            uri,
+            document_id: self.document_id,
+            revision: self.buffer.revision(),
+        });
+    }
+
+    fn poll_completion_results(&mut self) {
+        for result in self.document_sync.drain_completion_results() {
+            let Some(pending) = self.pending_completion.as_ref() else { continue; };
+            if result.operation_id != pending.operation_id
+                || result.uri != pending.uri
+                || pending.document_id != self.document_id
+                || pending.revision != self.buffer.revision()
+                || self.path.as_deref().map(nexus_lsp::uri::path_to_uri).as_deref()
+                    != Some(pending.uri.as_str())
+            {
+                continue;
+            }
+            self.pending_completion = None;
+            if let Ok(Some(response)) = result.result {
+                let items = response.items().to_vec();
+                if !items.is_empty() {
+                    self.completion_popup = Some(CompletionPopup { items, selected: 0 });
+                    self.needs_redraw = true;
+                }
+            }
+        }
+    }
+
+    fn handle_completion_key(&mut self, key: ratatui::crossterm::event::KeyEvent) -> bool {
+        if self.completion_popup.is_none()
+            || key.kind == ratatui::crossterm::event::KeyEventKind::Release
+            || !key.modifiers.is_empty()
+        {
+            return false;
+        }
+        use ratatui::crossterm::event::KeyCode;
+        match key.code {
+            KeyCode::Up => {
+                if let Some(popup) = self.completion_popup.as_mut() { popup.move_selection(-1); }
+                self.needs_redraw = true;
+                true
+            }
+            KeyCode::Down => {
+                if let Some(popup) = self.completion_popup.as_mut() { popup.move_selection(1); }
+                self.needs_redraw = true;
+                true
+            }
+            KeyCode::Enter | KeyCode::Tab => { self.accept_completion(); true }
+            KeyCode::Esc => { self.clear_completion(); self.needs_redraw = true; true }
+            _ => { self.completion_popup = None; false }
+        }
+    }
+
+    fn accept_completion(&mut self) {
+        let Some(popup) = self.completion_popup.take() else { return; };
+        let Some(item) = popup.items.get(popup.selected) else { return; };
+        let insertion = if item.insert_text_format == Some(2) {
+            item.label.clone()
+        } else {
+            item.insert_text.clone().unwrap_or_else(|| item.label.clone())
+        };
+        let cursor = self.view.cursor();
+        let line_start = match self.buffer.line_start(self.buffer.line_of_char(cursor).unwrap_or(0)) {
+            Ok(start) => start,
+            Err(_) => return,
+        };
+        let mut start = cursor.0;
+        while start > line_start.0 {
+            let previous = match self.buffer.char_at(CharOffset(start - 1)) {
+                Ok(Some(character)) => character,
+                _ => break,
+            };
+            if previous.is_alphanumeric() || previous == '_' { start -= 1; } else { break; }
+        }
+        let range = TextRange::new(CharOffset(start), cursor);
+        self.commit_session();
+        match self.buffer.apply_transaction(vec![Edit::new(range, insertion.clone())]) {
+            Ok(Some(transaction)) => {
+                self.apply_syntax_transaction(&transaction);
+                self.sync_change_active(&transaction);
+                self.view.clear_selection();
+                self.set_cursor_after_edit(CharOffset(start + insertion.chars().count()));
+            }
+            Ok(None) => {}
+            Err(error) => self.report_buffer_error("não foi possível aplicar a sugestão", &error),
+        }
+        self.pending_completion = None;
+        self.completion_trigger = None;
+        self.needs_redraw = true;
     }
 
     /// Coleta conclusões assíncronas de navegação para o consumidor da camada
@@ -2173,6 +2327,10 @@ impl App {
             self.commit_session();
         }
 
+        if let Some((trigger_kind, trigger_character)) = self.completion_trigger.take() {
+            self.request_completion(trigger_kind, trigger_character);
+        }
+
         self.age_status();
         self.check_external_changes();
         self.persist_recovery();
@@ -2185,6 +2343,7 @@ impl App {
             self.set_error(notice);
         }
         self.poll_navigation_results();
+        self.poll_completion_results();
         self.diagnostics = self.document_sync.drain_diagnostics();
         self.normalize_problem_selection();
     }
@@ -2327,6 +2486,10 @@ impl App {
                     }
                     // O foco do painel não deve permitir que teclas de filtro
                     // ou navegação alterem o documento.
+                    return;
+                }
+
+                if self.mode == Mode::Editor && self.handle_completion_key(key) {
                     return;
                 }
 
@@ -2583,6 +2746,7 @@ impl App {
     }
 
     fn move_cursor(&mut self, motion: Motion, select: bool) {
+        self.clear_completion();
         self.commit_session();
 
         match self.view.move_cursor(&self.buffer, motion, select) {
@@ -2595,6 +2759,13 @@ impl App {
 
     fn insert_char(&mut self, character: char) {
         self.insert_text(&character.to_string(), EditKind::Insert);
+        if character.is_alphanumeric() || character == '_' {
+            self.schedule_completion(1, None);
+        } else if character == '.' {
+            self.schedule_completion(2, Some(character.to_string()));
+        } else {
+            self.clear_completion();
+        }
     }
 
     fn insert_text(&mut self, text: &str, kind: EditKind) {
@@ -2967,6 +3138,7 @@ impl App {
     }
 
     fn backspace(&mut self) {
+        self.schedule_completion(1, None);
         if !self.buffer.is_consistent() {
             self.report_recovery();
             return;
@@ -3028,6 +3200,7 @@ impl App {
     }
 
     fn delete_forward(&mut self) {
+        self.clear_completion();
         if !self.buffer.is_consistent() {
             self.report_recovery();
             return;
