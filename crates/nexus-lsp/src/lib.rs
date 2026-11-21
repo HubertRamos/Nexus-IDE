@@ -15,6 +15,7 @@
 //! - [`jsonrpc`]: mensagens JSON-RPC 2.0.
 //! - [`transport`]: enquadramento `Content-Length` sobre STDIO.
 //! - [`protocol`]: tipos e capacidades do protocolo LSP.
+//! - [`completion`]: modelos tipados de completion para IntelliSense.
 //! - [`utf16`]: conversão entre offsets do Nexus e posições UTF-16.
 //! - [`uri`]: conversão entre caminhos locais e URIs `file://`.
 //! - [`sync`]: sincronização de documentos conforme as capacidades do servidor.
@@ -25,6 +26,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod completion;
 pub mod jsonrpc;
 pub mod languages;
 pub mod manager;
