@@ -138,6 +138,9 @@ pub struct NavigationChoice {
 /// Sugestões de completion atualmente apresentadas no editor.
 #[derive(Debug, Clone)]
 pub struct CompletionPopup {
+    /// Resposta original do servidor, preservada para permitir apagar caracteres
+    /// e recuperar sugestões que saíram temporariamente do filtro.
+    source_items: Vec<CompletionItem>,
     items: Vec<CompletionItem>,
     selected: usize,
 }
@@ -158,6 +161,25 @@ struct PendingCompletion {
     uri: String,
     document_id: DocumentId,
     revision: u64,
+}
+
+/// Filtra sugestões localmente pelo prefixo atual, preservando a ordem do servidor.
+fn filter_completion_items(items: &[CompletionItem], prefix: &str) -> Vec<CompletionItem> {
+    if prefix.is_empty() {
+        return items.to_vec();
+    }
+    let prefix = prefix.to_lowercase();
+    items
+        .iter()
+        .filter(|item| {
+            item.filter_text
+                .as_deref()
+                .unwrap_or(&item.label)
+                .to_lowercase()
+                .starts_with(&prefix)
+        })
+        .cloned()
+        .collect()
 }
 
 /// Lista modal de destinos para navegações com mais de um resultado.
@@ -1011,7 +1033,11 @@ impl App {
             if let Ok(Some(response)) = result.result {
                 let items = response.items().to_vec();
                 if !items.is_empty() {
-                    self.completion_popup = Some(CompletionPopup { items, selected: 0 });
+                    self.completion_popup = Some(CompletionPopup {
+                        source_items: items.clone(),
+                        items,
+                        selected: 0,
+                    });
                     self.needs_redraw = true;
                 }
             }
@@ -1031,19 +1057,73 @@ impl App {
         use ratatui::crossterm::event::KeyCode;
         match key.code {
             KeyCode::Up => {
-                if let Some(popup) = self.completion_popup.as_mut() { popup.move_selection(-1); }
+                if let Some(popup) = self.completion_popup.as_mut() {
+                    popup.move_selection(-1);
+                }
                 self.needs_redraw = true;
                 true
             }
             KeyCode::Down => {
-                if let Some(popup) = self.completion_popup.as_mut() { popup.move_selection(1); }
+                if let Some(popup) = self.completion_popup.as_mut() {
+                    popup.move_selection(1);
+                }
                 self.needs_redraw = true;
                 true
             }
-            KeyCode::Enter | KeyCode::Tab => { self.accept_completion(); true }
-            KeyCode::Esc => { self.clear_completion(); self.needs_redraw = true; true }
-            _ => { self.completion_popup = None; false }
+            KeyCode::Enter | KeyCode::Tab => {
+                if self.completion_popup.as_ref().is_some_and(|popup| !popup.items.is_empty()) {
+                    self.accept_completion();
+                }
+                true
+            }
+            KeyCode::Esc => {
+                self.clear_completion();
+                self.needs_redraw = true;
+                true
+            }
+            // Deixa a edição acontecer normalmente; insert_char/backspace/delete
+            // atualizam o filtro depois que o buffer e o cursor forem alterados.
+            KeyCode::Char(_) | KeyCode::Backspace => false,
+            _ => {
+                self.clear_completion();
+                false
+            }
         }
+    }
+
+    fn refresh_completion_filter(&mut self) {
+        let Some(popup) = self.completion_popup.as_mut() else {
+            return;
+        };
+        let Ok(text) = self.buffer.text() else {
+            return;
+        };
+        let cursor = self.view.cursor().0.min(text.chars().count());
+        let line_start = text[..text.char_indices().take(cursor).last().map(|(i, c)| i + c.len_utf8()).unwrap_or(0)]
+            .rfind('\n')
+            .map(|index| index + 1)
+            .unwrap_or(0);
+        let prefix: String = text[line_start..]
+            .chars()
+            .take_while(|character| character.is_alphanumeric() || *character == '_')
+            .collect();
+        let prefix = if prefix.is_empty() {
+            String::new()
+        } else {
+            // O cursor pode estar no meio da linha: considera somente o texto
+            // imediatamente anterior ao cursor, não o restante da linha.
+            let before_cursor: String = text.chars().take(cursor).collect();
+            before_cursor.rsplit('\n').next().unwrap_or("").chars()
+                .rev()
+                .take_while(|character| character.is_alphanumeric() || *character == '_')
+                .collect::<String>().chars().rev().collect()
+        };
+        let selected_label = popup.items.get(popup.selected).map(|item| item.label.clone());
+        popup.items = filter_completion_items(&popup.source_items, &prefix);
+        popup.selected = selected_label
+            .and_then(|label| popup.items.iter().position(|item| item.label == label))
+            .unwrap_or(0);
+        self.needs_redraw = true;
     }
 
     fn accept_completion(&mut self) {
@@ -2771,9 +2851,14 @@ impl App {
     }
 
     fn insert_char(&mut self, character: char) {
+        let had_popup = self.completion_popup.is_some();
         self.insert_text(&character.to_string(), EditKind::Insert);
         if character.is_alphanumeric() || character == '_' {
-            self.schedule_completion(1, None);
+            if had_popup {
+                self.refresh_completion_filter();
+            } else {
+                self.schedule_completion(1, None);
+            }
         } else if character == '.' {
             self.schedule_completion(2, Some(character.to_string()));
         } else {
@@ -3151,7 +3236,9 @@ impl App {
     }
 
     fn backspace(&mut self) {
-        self.schedule_completion(1, None);
+        if self.completion_popup.is_none() {
+            self.schedule_completion(1, None);
+        }
         if !self.buffer.is_consistent() {
             self.report_recovery();
             return;
@@ -3159,11 +3246,13 @@ impl App {
 
         if self.view.has_selection() {
             self.delete_selection();
+            self.refresh_completion_filter();
             return;
         }
 
         let cursor = self.view.cursor();
         if cursor.0 == 0 {
+            self.refresh_completion_filter();
             return;
         }
 
@@ -3210,10 +3299,11 @@ impl App {
                 self.commit_session();
             }
         }
+        self.refresh_completion_filter();
     }
 
     fn delete_forward(&mut self) {
-        self.clear_completion();
+        let had_completion = self.completion_popup.is_some();
         if !self.buffer.is_consistent() {
             self.report_recovery();
             return;
