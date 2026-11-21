@@ -10,6 +10,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::manager::{LspServer, ServerError};
 use crate::protocol::{Position, ServerCapabilities, TextDocumentIdentifier};
 
 /// Contexto que explica por que o cliente solicitou sugestões.
@@ -109,6 +110,26 @@ pub fn supports_completion(capabilities: &ServerCapabilities) -> bool {
         .is_some_and(Value::is_object)
 }
 
+/// Solicita sugestões ao servidor que já atende o documento.
+///
+/// A resposta `null` definida pelo LSP é representada como `Ok(None)`.
+/// Servidores sem `completionProvider` não recebem uma requisição inválida.
+pub async fn request_completion(
+    server: &LspServer,
+    params: CompletionParams,
+) -> Result<Option<CompletionResponse>, ServerError> {
+    if !supports_completion(server.capabilities()) {
+        return Err(ServerError::Protocol(
+            "servidor LSP não oferece textDocument/completion".to_owned(),
+        ));
+    }
+
+    server
+        .request_typed("textDocument/completion", params)
+        .await
+}
+
+/// Itens em ordem recebida, sem alterar a ordenação do servidor.
 impl CompletionResponse {
     /// Itens em ordem recebida, sem alterar a ordenação do servidor.
     pub fn items(&self) -> &[CompletionItem] {
