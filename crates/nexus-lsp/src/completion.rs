@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::protocol::{Position, TextDocumentIdentifier};
+use crate::protocol::{Position, ServerCapabilities, TextDocumentIdentifier};
 
 /// Contexto que explica por que o cliente solicitou sugestões.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -96,6 +96,17 @@ pub struct CompletionList {
 pub enum CompletionResponse {
     List(CompletionList),
     Items(Vec<CompletionItem>),
+}
+
+/// Verifica o suporte estático anunciado pelo servidor no handshake LSP.
+///
+/// `completionProvider` é preservado em `ServerCapabilities::extra` para
+/// manter o modelo de capacidades retrocompatível com extensões futuras.
+pub fn supports_completion(capabilities: &ServerCapabilities) -> bool {
+    capabilities
+        .extra
+        .get("completionProvider")
+        .is_some_and(Value::is_object)
 }
 
 impl CompletionResponse {
